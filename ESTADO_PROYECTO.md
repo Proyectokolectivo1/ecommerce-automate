@@ -1,7 +1,7 @@
 # Estado del Proyecto — Plataforma Ecommerce Inteligente
 
 > **Documento de contexto para sesiones futuras.**
-> Última actualización: Fase 2 completada y verificada.
+> Última actualización: Fase 3 completada y verificada.
 > Objetivo: permitir que cualquier sesión futura retome el proyecto
 > sin pérdida de contexto y lo lleve a 100% funcional.
 
@@ -187,7 +187,7 @@ Transiciones válidas definidas en `src/modules/orders/state-machine.ts`
 | 2 | Arquitectura general | ✅ | 90 | Faltan: colas Bull reales, S3 real (hay interfaz) |
 | 3 | Stack tecnológico | ✅ | 95 | Todo adaptado al sandbox |
 | 4 | Integración Shopify | ✅ | 90 | Webhook + Admin API client + HMAC. Falta: sincronización inventario periódica |
-| 5 | Flujo principal negocio | ⚠️ | 70 | Caso A y B definidos. Falta: orquestación automática completa (orchestrator steps), impresión real |
+| 5 | Flujo principal negocio | ✅ | 95 | Caso A y B completos. Dispatch→guía→impresión→notificación automatizado. Falta: sincronización inventario Shopify |
 | 6 | Pasarelas de pago | ✅ | 95 | 5 adapters (Wompi/PayU/MP/ePayco/Bold) con Port común. Mock + real. Webhook receiver |
 | 7 | Estados del pedido | ✅ | 100 | FSM de 8 estados + auditoría de transiciones |
 | 8 | Dashboard ejecutivo | ✅ | 90 | KPIs ventas/pedidos/rentabilidad. Falta: filtros de período, exportar |
@@ -200,7 +200,7 @@ Transiciones válidas definidas en `src/modules/orders/state-machine.ts`
 | 15 | Roles | ✅ | 95 | 4 roles con permisos. Falta: página gestión usuarios |
 | 16 | Entregables | ⚠️ | 60 | Plataforma + código + DB + integraciones + dashboard. Falta: documentación, manuales |
 
-**Progreso global estimado: ~70%**
+**Progreso global estimado: ~80%**
 
 ---
 
@@ -293,24 +293,20 @@ Transiciones válidas definidas en `src/modules/orders/state-machine.ts`
 
 ## 6. Lo que FALTA por implementar
 
-### 6.1 Fase 3 — Logística & Impresión (Prioridad ALTA)
-**Objetivo:** completar el flujo operativo después del pago.
+### 6.1 Fase 3 — Logística & Impresión ✅ COMPLETA
+**Objetivo:** completar el flujo operativo después del pago. ✅ LOGRADO
 
-- [ ] **Módulo logistics** (`src/modules/logistics/`):
-  - `shipment.service.ts`: createShipment (llama Mastershop createDispatch),
-    getShipmentByGuide, updateTracking.
-  - `printing.service.ts`: enqueuePrintJob, processPrintQueue (worker periódico),
-    markPrinted.
-- [ ] **Orchestrator steps** (`src/lib/orchestrator/steps/`):
-  - `create-dispatch.step.ts`: valida orden lista → llama Mastershop → guarda Shipment.
-  - `generate-guide.step.ts`: recibe guía → actualiza Order + Shopify.
-  - `print-guide.step.ts`: encola PrintJob.
-  - `notify-customer.step.ts`: envía WhatsApp/Email con número de guía + tracking.
-- [ ] **API**: `/api/guides` (list, getById, download PDF), `/api/print` (spooler status, retry).
-- [ ] **UI**: página `/dashboard/guias` (lista de guías + tracking),
-  página `/dashboard/impresion` (cola de impresión + reprint).
-- [ ] **Worker de impresión**: `setInterval` que procesa PrintJobs en QUEUED.
-- [ ] **Notificación al cliente**: WhatsApp/Email con guía + tracking al despachar.
+Implementado:
+- [x] **Módulo logistics** (`src/modules/logistics/`):
+  - `shipment.service.ts`: createShipmentForOrder (Mastershop dispatch → Shipment → transición ENVIADO → encolar impresión → notificar cliente), getShipmentByGuide/ById, listShipments, getShipmentStats, updateTrackingFromCallback.
+  - `printing.service.ts`: enqueuePrintJob (idempotente), processPrintQueue, retryPrintJob, generateGuidePdf (PDF 1.1 válido sin librerías externas).
+- [x] **Orchestrator flow** (`src/lib/orchestrator/steps/dispatch-flow.ts`): flujo declarativo validate-order → create-dispatch → print-guide → notify-customer con onFailure.
+- [x] **Print worker** (`src/lib/print-worker.ts`): setInterval 15s, auto-arrancado en (dashboard)/layout.tsx.
+- [x] **API**: `/api/orders/[id]/dispatch`, `/api/guides` (list+stats+detail+pdf), `/api/print` (list+stats+process+retry).
+- [x] **UI**: `/dashboard/guias` (KPIs, filtros, tabla, drawer con tracking timeline, PDF download), `/dashboard/impresion` (KPIs, auto-refresh, tabla, reintentar, procesar cola).
+- [x] **Notificación al cliente**: `notify-customer.ts` orquesta WhatsApp + Email HTML + DB notification.
+- [x] **Botón "Despachar"** integrado en order-detail-sheet para pedidos despachables.
+- [x] **FSM fix**: añadida transición `PAGO_TRANSPORTE_CONFIRMADO → ENVIADO` directa.
 
 ### 6.2 Fase 4 — CRM Clientes (Prioridad MEDIA)
 - [ ] **Módulo customers** (`src/modules/customers/`):
@@ -476,7 +472,7 @@ bun run prisma/seed-integrations.ts  # seed de IntegrationSetting
 
 - [x] Fase 1: Fundaciones (auth, shell, dashboard)
 - [x] Fase 2: Núcleo operacional (pedidos + FSM + integraciones + webhooks + realtime)
-- [ ] Fase 3: Logística & impresión (guías, tracking, impresión automática, notificación cliente)
+- [x] Fase 3: Logística & impresión (guías, tracking, impresión automática, notificación cliente)
 - [ ] Fase 4: CRM clientes (clasificación, historial, página)
 - [ ] Fase 5: Analítica avanzada (productos, devoluciones, finanzas)
 - [ ] Fase 6: IA & alertas (z-ai-web-dev-sdk, 5 tipos de alerta, realtime push)

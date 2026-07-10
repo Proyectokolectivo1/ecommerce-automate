@@ -1,0 +1,704 @@
+     1→'use client'
+     2→
+     3→// ============================================================
+     4→// order-detail-sheet.tsx — Right-side drawer with full order detail
+     5→// ============================================================
+     6→// Sheet (lado derecho) que muestra el detalle completo de un
+     7→// pedido: cliente, items, envíos, transacciones, bitácora de
+     8→// estados (timeline) y botones para ejecutar transiciones
+     9→// permitidas por la FSM.
+    10→//
+    11→// - Se alimenta de `GET /api/orders/[id]` con React Query.
+    12→// - Al ejecutar una transición, invalida los queries del pedido
+    13→//   y de la lista para refrescar UI.
+    14→
+    15→import { useState } from 'react'
+    16→import { useQuery, useQueryClient } from '@tanstack/react-query'
+    17→import {
+    18→  Package,
+    19→  MapPin,
+    20→  CreditCard,
+    21→  Truck,
+    22→  User,
+    23→  Mail,
+    24→  Phone,
+    25→  Calendar,
+    26→  Receipt,
+    27→  AlertTriangle,
+    28→  Ban,
+    29→  ArrowRight,
+    30→  Clock,
+    31→  Building2,
+    32→  CircleDot,
+    33→} from 'lucide-react'
+    34→
+    35→import {
+    36→  Sheet,
+    37→  SheetContent,
+    38→  SheetHeader,
+    39→  SheetTitle,
+    40→  SheetDescription,
+    41→} from '@/components/ui/sheet'
+    42→import { Badge } from '@/components/ui/badge'
+    43→import { Button } from '@/components/ui/button'
+    44→import { Separator } from '@/components/ui/separator'
+    45→import { Skeleton } from '@/components/ui/skeleton'
+    46→import { ScrollArea } from '@/components/ui/scroll-area'
+    47→import { StatusBadge } from '@/components/shared/status-badge'
+    48→import { TransitionDialog } from './transition-dialog'
+    49→import { formatCOP, formatDate } from '@/lib/format'
+    50→import {
+    51→  ORDER_STATE_LABELS,
+    52→  getAllowedTransitions,
+    53→} from '@/modules/orders/state-machine'
+    54→
+    55→interface OrderDetailSheetProps {
+    56→  orderId: string | null
+    57→  onClose: () => void
+    58→  onTransitioned: () => void
+    59→}
+    60→
+    61→// ------------------------------------------------------------
+    62→// Helpers de presentación
+    63→// ------------------------------------------------------------
+    64→
+    65→const PAYMENT_METHOD_LABEL: Record<string, string> = {
+    66→  PREPAID: 'Prepagado',
+    67→  COD: 'Contra entrega',
+    68→}
+    69→
+    70→const CARRIER_LABEL: Record<string, string> = {
+    71→  SERVIENTREGA: 'Servientrega',
+    72→  ENVIA: 'Envía',
+    73→  INTERRAPIDISIMO: 'Interrapidísimo',
+    74→}
+    75→
+    76→const SHIPMENT_STATUS_LABEL: Record<string, string> = {
+    77→  CREATED: 'Creado',
+    78→  PRINTED: 'Impreso',
+    79→  IN_TRANSIT: 'En tránsito',
+    80→  DELIVERED: 'Entregado',
+    81→  RETURNED: 'Devuelto',
+    82→}
+    83→
+    84→const TX_STATUS_LABEL: Record<string, string> = {
+    85→  PENDING: 'Pendiente',
+    86→  APPROVED: 'Aprobada',
+    87→  DECLINED: 'Rechazada',
+    88→  REFUNDED: 'Reembolsada',
+    89→}
+    90→
+    91→const TX_TYPE_LABEL: Record<string, string> = {
+    92→  TRANSPORT: 'Transporte',
+    93→  ORDER_PAYMENT: 'Pago del pedido',
+    94→}
+    95→
+    96→const TX_STATUS_VARIANT: Record<
+    97→  string,
+    98→  'secondary' | 'default' | 'destructive' | 'outline'
+    99→> = {
+   100→  PENDING: 'secondary',
+   101→  APPROVED: 'default',
+   102→  DECLINED: 'destructive',
+   103→  REFUNDED: 'outline',
+   104→}
+   105→
+   106→function txStatusClass(status: string): string {
+   107→  switch (status) {
+   108→    case 'APPROVED':
+   109→      return 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-900/30 dark:text-emerald-300'
+   110→    case 'DECLINED':
+   111→      return ''
+   112→    case 'REFUNDED':
+   113→      return 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-900/30 dark:text-amber-300'
+   114→    default:
+   115→      return 'bg-zinc-100 text-zinc-800 border-zinc-300 dark:bg-zinc-800/60 dark:text-zinc-200'
+   116→  }
+   117→}
+   118→
+   119→function actorLabel(actor: string | null): string {
+   120→  if (!actor) return 'Sistema'
+   121→  if (actor === 'system') return 'Sistema'
+   122→  if (actor === 'shopify') return 'Shopify'
+   123→  if (actor === 'bodega') return 'Bodega'
+   124→  return actor.slice(0, 8)
+   125→}
+   126→
+   127→// ------------------------------------------------------------
+   128→// Sub-secciones
+   129→// ------------------------------------------------------------
+   130→
+   131→function SectionTitle({
+   132→  icon: Icon,
+   133→  children,
+   134→}: {
+   135→  icon: React.ComponentType<{ className?: string }>
+   136→  children: React.ReactNode
+   137→}) {
+   138→  return (
+   139→    <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+   140→      <Icon className="size-4 text-muted-foreground" />
+   141→      {children}
+   142→    </h3>
+   143→  )
+   144→}
+   145→
+   146→function InfoRow({
+   147→  label,
+   148→  value,
+   149→  icon: Icon,
+   150→}: {
+   151→  label: string
+   152→  value: React.ReactNode
+   153→  icon?: React.ComponentType<{ className?: string }>
+   154→}) {
+   155→  return (
+   156→    <div className="flex items-start justify-between gap-3 py-1.5">
+   157→      <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+   158→        {Icon && <Icon className="size-3.5" />}
+   159→        {label}
+   160→      </span>
+   161→      <span className="text-right text-xs font-medium text-foreground">
+   162→        {value ?? '—'}
+   163→      </span>
+   164→    </div>
+   165→  )
+   166→}
+   167→
+   168→// ------------------------------------------------------------
+   169→// Componente principal
+   170→// ------------------------------------------------------------
+   171→
+   172→export function OrderDetailSheet({
+   173→  orderId,
+   174→  onClose,
+   175→  onTransitioned,
+   176→}: OrderDetailSheetProps) {
+   177→  const qc = useQueryClient()
+   178→  const [transitionTarget, setTransitionTarget] = useState<string | null>(null)
+   179→
+   180→  const open = !!orderId
+   181→
+   182→  const { data: order, isLoading, isError } = useQuery({
+   183→    queryKey: ['order', orderId],
+   184→    enabled: !!orderId,
+   185→    queryFn: async () => {
+   186→      const res = await fetch(`/api/orders/${orderId}`)
+   187→      if (!res.ok) {
+   188→        const err = await res.json().catch(() => ({}))
+   189→        throw new Error(err?.error ?? `Error ${res.status}`)
+   190→      }
+   191→      return res.json()
+   192→    },
+   193→  })
+   194→
+   195→  const allowedTransitions = order?.status
+   196→    ? getAllowedTransitions(order.status as string)
+   197→    : []
+   198→
+   199→  const statusLogsDesc = order?.statusLogs
+   200→    ? [...order.statusLogs].sort(
+   201→        (a: StatusLogView, b: StatusLogView) =>
+   202→          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+   203→      )
+   204→    : []
+   205→
+   206→  function handleOpenChange(next: boolean) {
+   207→    if (!next) onClose()
+   208→  }
+   209→
+   210→  function handleTransitionSuccess() {
+   211→    void qc.invalidateQueries({ queryKey: ['order', orderId] })
+   212→    void qc.invalidateQueries({ queryKey: ['orders'] })
+   213→    onTransitioned()
+   214→    setTransitionTarget(null)
+   215→  }
+   216→
+   217→  const isCodPendingTransport =
+   218→    order?.paymentMethod === 'COD' &&
+   219→    order?.status === 'PENDIENTE_PAGO_TRANSPORTE'
+   220→
+   221→  return (
+   222→    <>
+   223→    <Sheet open={open} onOpenChange={handleOpenChange}>
+   224→      <SheetContent
+   225→        side="right"
+   226→        className="w-full gap-0 p-0 sm:max-w-[480px]"
+   227→      >
+   228→        {/* Header */}
+   229→        <SheetHeader className="border-b p-4 pr-12">
+   230→          <SheetTitle className="flex items-center justify-between gap-2">
+   231→            <span className="font-mono text-base">
+   232→              {order?.orderNumber ?? 'Pedido'}
+   233→            </span>
+   234→            {order?.status && <StatusBadge status={order.status} />}
+   235→          </SheetTitle>
+   236→          <SheetDescription className="sr-only">
+   237→            Detalle del pedido {order?.orderNumber}
+   238→          </SheetDescription>
+   239→        </SheetHeader>
+   240→
+   241→        {/* Body */}
+   242→        <ScrollArea className="flex-1">
+   243→          <div className="space-y-6 p-4">
+   244→            {isLoading && <DetailSkeleton />}
+   245→
+   246→            {isError && (
+   247→              <div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
+   248→                <AlertTriangle className="size-8 text-amber-500" />
+   249→                <p className="text-sm font-medium">No se pudo cargar el pedido</p>
+   250→                <p className="text-xs text-muted-foreground">
+   251→                  Intenta cerrar y abrir nuevamente el detalle.
+   252→                </p>
+   253→              </div>
+   254→            )}
+   255→
+   256→            {order && !isLoading && !isError && (
+   257→              <>
+   258→                {/* COD pendiente de pago de transporte */}
+   259→                {isCodPendingTransport && (
+   260→                  <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 dark:border-amber-700 dark:bg-amber-900/20">
+   261→                    <div className="flex items-center gap-2 text-amber-900 dark:text-amber-200">
+   262→                      <AlertTriangle className="size-4" />
+   263→                      <span className="text-sm font-semibold">
+   264→                        Pago de transporte pendiente
+   265→                      </span>
+   266→                    </div>
+   267→                    <p className="mt-1 text-xs text-amber-800 dark:text-amber-300">
+   268→                      Este pedido es contra entrega y requiere el pago del
+   269→                      transporte (
+   270→                      <strong>{formatCOP(order.transportCost ?? 0)}</strong>)
+   271→                      antes de avanzar a preparación.
+   272→                    </p>
+   273→                    <Button
+   274→                      type="button"
+   275→                      size="sm"
+   276→                      variant="outline"
+   277→                      className="mt-3 gap-2 border-amber-400 bg-white text-amber-900 hover:bg-amber-100 dark:border-amber-600 dark:bg-amber-900/40 dark:text-amber-100 dark:hover:bg-amber-900/60"
+   278→                      disabled
+   279→                      title="Próximamente: integración con pasarelas de pago"
+   280→                    >
+   281→                      <CreditCard className="size-3.5" />
+   282→                      Generar link de pago
+   283→                    </Button>
+   284→                  </div>
+   285→                )}
+   286→
+   287→                {/* Cliente */}
+   288→                <section className="space-y-2">
+   289→                  <SectionTitle icon={User}>Cliente</SectionTitle>
+   290→                  <div className="rounded-lg border bg-card p-3">
+   291→                    <div className="text-sm font-semibold text-foreground">
+   292→                      {order.customer?.name ?? '—'}
+   293→                    </div>
+   294→                    <div className="mt-1 space-y-0.5 text-xs text-muted-foreground">
+   295→                      {order.customer?.email && (
+   296→                        <div className="flex items-center gap-1.5">
+   297→                          <Mail className="size-3.5" />
+   298→                          <span>{order.customer.email}</span>
+   299→                        </div>
+   300→                      )}
+   301→                      {order.customer?.phone && (
+   302→                        <div className="flex items-center gap-1.5">
+   303→                          <Phone className="size-3.5" />
+   304→                          <span>{order.customer.phone}</span>
+   305→                        </div>
+   306→                      )}
+   307→                      {order.city && (
+   308→                        <div className="flex items-center gap-1.5">
+   309→                          <MapPin className="size-3.5" />
+   310→                          <span>
+   311→                            {order.city}
+   312→                            {order.address ? ` · ${order.address}` : ''}
+   313→                          </span>
+   314→                        </div>
+   315→                      )}
+   316→                    </div>
+   317→                  </div>
+   318→                </section>
+   319→
+   320→                {/* Información del pedido */}
+   321→                <section className="space-y-2">
+   322→                  <SectionTitle icon={Receipt}>Resumen</SectionTitle>
+   323→                  <div className="rounded-lg border bg-card p-3">
+   324→                    <InfoRow
+   325→                      label="Fecha"
+   326→                      value={formatDate(order.placedAt)}
+   327→                      icon={Calendar}
+   328→                    />
+   329→                    <InfoRow
+   330→                      label="Método de pago"
+   331→                      value={
+   332→                        PAYMENT_METHOD_LABEL[order.paymentMethod] ??
+   333→                        order.paymentMethod
+   334→                      }
+   335→                      icon={CreditCard}
+   336→                    />
+   337→                    {order.paymentMethod === 'COD' && (
+   338→                      <InfoRow
+   339→                        label="¿Transporte pagado?"
+   340→                        value={
+   341→                          order.codPaid ? (
+   342→                            <span className="text-emerald-600 dark:text-emerald-400">
+   343→                              Sí
+   344→                            </span>
+   345→                          ) : (
+   346→                            <span className="text-amber-600 dark:text-amber-400">
+   347→                              No
+   348→                            </span>
+   349→                          )
+   350→                        }
+   351→                      />
+   352→                    )}
+   353→                    <Separator className="my-2" />
+   354→                    <InfoRow
+   355→                      label="Subtotal"
+   356→                      value={formatCOP(order.subtotal)}
+   357→                    />
+   358→                    <InfoRow
+   359→                      label="Envío (cobrado)"
+   360→                      value={formatCOP(order.shippingCost)}
+   361→                    />
+   362→                    {order.transportCost > 0 && (
+   363→                      <InfoRow
+   364→                        label="Costo transporte"
+   365→                        value={formatCOP(order.transportCost)}
+   366→                      />
+   367→                    )}
+   368→                    <Separator className="my-2" />
+   369→                    <InfoRow
+   370→                      label="Total"
+   371→                      value={
+   372→                        <span className="text-base font-bold">
+   373→                          {formatCOP(order.total)}
+   374→                        </span>
+   375→                      }
+   376→                    />
+   377→                  </div>
+   378→                </section>
+   379→
+   380→                {/* Items */}
+   381→                <section className="space-y-2">
+   382→                  <SectionTitle icon={Package}>Productos</SectionTitle>
+   383→                  <div className="space-y-2">
+   384→                    {order.items?.length === 0 && (
+   385→                      <p className="text-xs text-muted-foreground">
+   386→                        Este pedido no tiene items.
+   387→                      </p>
+   388→                    )}
+   389→                    {order.items?.map((item: OrderItemView) => (
+   390→                      <div
+   391→                        key={item.id}
+   392→                        className="rounded-lg border bg-card p-3"
+   393→                      >
+   394→                        <div className="flex items-start justify-between gap-2">
+   395→                          <div className="min-w-0">
+   396→                            <div className="truncate text-sm font-medium">
+   397→                              {item.title}
+   398→                            </div>
+   399→                            <div className="mt-0.5 text-xs text-muted-foreground">
+   400→                              {item.sku ? (
+   401→                                <span className="font-mono">{item.sku}</span>
+   402→                              ) : (
+   403→                                <span>Sin SKU</span>
+   404→                              )}{' '}
+   405→                              · Qty {item.quantity}
+   406→                            </div>
+   407→                          </div>
+   408→                          <div className="text-right text-xs">
+   409→                            <div className="text-muted-foreground">
+   410→                              {formatCOP(item.unitPrice)} c/u
+   411→                            </div>
+   412→                            <div className="font-semibold">
+   413→                              {formatCOP(item.total)}
+   414→                            </div>
+   415→                          </div>
+   416→                        </div>
+   417→                      </div>
+   418→                    ))}
+   419→                  </div>
+   420→                </section>
+   421→
+   422→                {/* Envíos y guías */}
+   423→                {order.shipments?.length > 0 && (
+   424→                  <section className="space-y-2">
+   425→                    <SectionTitle icon={Truck}>Envíos y seguimiento</SectionTitle>
+   426→                    <div className="space-y-2">
+   427→                      {order.shipments.map((sh: ShipmentView) => (
+   428→                        <div
+   429→                          key={sh.id}
+   430→                          className="rounded-lg border bg-card p-3"
+   431→                        >
+   432→                          <div className="flex flex-wrap items-center justify-between gap-2">
+   433→                            <div className="flex items-center gap-2 text-xs">
+   434→                              <Building2 className="size-3.5 text-muted-foreground" />
+   435→                              <span className="font-medium">
+   436→                                {sh.carrier
+   437→                                  ? CARRIER_LABEL[sh.carrier] ?? sh.carrier
+   438→                                  : 'Transportadora no asignada'}
+   439→                              </span>
+   440→                              <Badge variant="outline" className="text-[10px]">
+   441→                                {SHIPMENT_STATUS_LABEL[sh.status] ?? sh.status}
+   442→                              </Badge>
+   443→                            </div>
+   444→                            {sh.guideNumber && (
+   445→                              <div className="font-mono text-xs text-muted-foreground">
+   446→                                #{sh.guideNumber}
+   447→                              </div>
+   448→                            )}
+   449→                          </div>
+   450→                          {sh.trackingEvents?.length > 0 && (
+   451→                            <ol className="mt-3 space-y-2 border-l border-border pl-3">
+   452→                              {sh.trackingEvents
+   453→                                .slice()
+   454→                                .sort(
+   455→                                  (
+   456→                                    a: TrackingEventView,
+   457→                                    b: TrackingEventView,
+   458→                                  ) =>
+   459→                                    new Date(b.occurredAt).getTime() -
+   460→                                    new Date(a.occurredAt).getTime(),
+   461→                                )
+   462→                                .map((ev: TrackingEventView) => (
+   463→                                  <li
+   464→                                    key={ev.id}
+   465→                                    className="relative text-xs"
+   466→                                  >
+   467→                                    <CircleDot className="absolute -left-[18px] size-3 text-muted-foreground" />
+   468→                                    <div className="font-medium text-foreground">
+   469→                                      {ev.message ?? ev.status}
+   470→                                    </div>
+   471→                                    <div className="text-muted-foreground">
+   472→                                      {ev.city ? `${ev.city} · ` : ''}
+   473→                                      {formatDate(ev.occurredAt)}
+   474→                                    </div>
+   475→                                  </li>
+   476→                                ))}
+   477→                            </ol>
+   478→                          )}
+   479→                        </div>
+   480→                      ))}
+   481→                    </div>
+   482→                  </section>
+   483→                )}
+   484→
+   485→                {/* Transacciones */}
+   486→                {order.transactions?.length > 0 && (
+   487→                  <section className="space-y-2">
+   488→                    <SectionTitle icon={CreditCard}>Transacciones</SectionTitle>
+   489→                    <div className="space-y-2">
+   490→                      {order.transactions.map((tx: TransactionView) => (
+   491→                        <div
+   492→                          key={tx.id}
+   493→                          className="rounded-lg border bg-card p-3"
+   494→                        >
+   495→                          <div className="flex flex-wrap items-center justify-between gap-2">
+   496→                            <div className="text-xs">
+   497→                              <span className="font-medium">{tx.provider}</span>
+   498→                              <span className="text-muted-foreground">
+   499→                                {' '}
+   500→                                · {TX_TYPE_LABEL[tx.type] ?? tx.type}
+   501→                              </span>
+   502→                            </div>
+   503→                            <Badge
+   504→                              variant={TX_STATUS_VARIANT[tx.status] ?? 'outline'}
+   505→                              className={txStatusClass(tx.status)}
+   506→                            >
+   507→                              {TX_STATUS_LABEL[tx.status] ?? tx.status}
+   508→                            </Badge>
+   509→                          </div>
+   510→                          <div className="mt-1 flex items-center justify-between text-xs">
+   511→                            <span className="font-mono text-muted-foreground">
+   512→                              {tx.reference ?? tx.providerTxId ?? '—'}
+   513→                            </span>
+   514→                            <span className="font-semibold">
+   515→                              {formatCOP(tx.amount)}
+   516→                            </span>
+   517→                          </div>
+   518→                        </div>
+   519→                      ))}
+   520→                    </div>
+   521→                  </section>
+   522→                )}
+   523→
+   524→                {/* Timeline de estados */}
+   525→                <section className="space-y-2">
+   526→                  <SectionTitle icon={Clock}>Bitácora de estados</SectionTitle>
+   527→                  {statusLogsDesc.length === 0 ? (
+   528→                    <p className="text-xs text-muted-foreground">
+   529→                      Sin eventos registrados.
+   530→                    </p>
+   531→                  ) : (
+   532→                    <ol className="space-y-3 border-l border-border pl-4">
+   533→                      {statusLogsDesc.map(
+   534→                        (log: StatusLogView, idx: number) => (
+   535→                          <li key={log.id} className="relative">
+   536→                            <span
+   537→                              className={`absolute -left-[21px] top-1 size-3 rounded-full border-2 ${
+   538→                                idx === 0
+   539→                                  ? 'border-foreground bg-foreground'
+   540→                                  : 'border-muted-foreground bg-background'
+   541→                              }`}
+   542→                            />
+   543→                            <div className="flex flex-wrap items-center gap-1.5">
+   544→                              {log.fromStatus ? (
+   545→                                <>
+   546→                                  <StatusBadge
+   547→                                    status={log.fromStatus}
+   548→                                    size="sm"
+   549→                                  />
+   550→                                  <ArrowRight className="size-3 text-muted-foreground" />
+   551→                                  <StatusBadge
+   552→                                    status={log.toStatus}
+   553→                                    size="sm"
+   554→                                  />
+   555→                                </>
+   556→                              ) : (
+   557→                                <StatusBadge status={log.toStatus} size="sm" />
+   558→                              )}
+   559→                            </div>
+   560→                            <div className="mt-1 text-xs text-muted-foreground">
+   561→                              {formatDate(log.createdAt)} · por{' '}
+   562→                              {actorLabel(log.actor)}
+   563→                            </div>
+   564→                            {log.reason && (
+   565→                              <div className="mt-1 text-xs text-foreground">
+   566→                                “{log.reason}”
+   567→                              </div>
+   568→                            )}
+   569→                          </li>
+   570→                        ),
+   571→                      )}
+   572→                    </ol>
+   573→                  )}
+   574→                </section>
+   575→
+   576→                {/* Acciones / transiciones */}
+   577→                <section className="space-y-2">
+   578→                  <SectionTitle icon={ArrowRight}>Acciones</SectionTitle>
+   579→                  {allowedTransitions.length === 0 ? (
+   580→                    <div className="flex items-center gap-2 rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
+   581→                      <Ban className="size-4" />
+   582→                      Este pedido está en un estado terminal: no tiene
+   583→                      transiciones disponibles.
+   584→                    </div>
+   585→                  ) : (
+   586→                    <div className="grid grid-cols-1 gap-2">
+   587→                      {allowedTransitions.map((target) => (
+   588→                        <Button
+   589→                          key={target}
+   590→                          type="button"
+   591→                          variant={
+   592→                            target === 'CANCELADO' ? 'destructive' : 'default'
+   593→                          }
+   594→                          className="justify-between"
+   595→                          onClick={() => setTransitionTarget(target)}
+   596→                        >
+   597→                          <span className="flex items-center gap-2">
+   598→                            <ArrowRight className="size-4" />
+   599→                            Mover a{' '}
+   600→                            <span className="font-semibold">
+   601→                              {ORDER_STATE_LABELS[
+   602→                                target as keyof typeof ORDER_STATE_LABELS
+   603→                              ] ?? target}
+   604→                            </span>
+   605→                          </span>
+   606→                          <StatusBadge status={target} size="sm" />
+   607→                        </Button>
+   608→                      ))}
+   609→                    </div>
+   610→                  )}
+   611→                </section>
+   612→              </>
+   613→            )}
+   614→          </div>
+   615→        </ScrollArea>
+   616→      </SheetContent>
+   617→    </Sheet>
+   618→
+   619→    {/* Diálogo de confirmación de transición — fuera del Sheet para evitar conflicto de focus trap */}
+   620→    {order && transitionTarget && (
+   621→      <TransitionDialog
+   622→        open={!!transitionTarget}
+   623→        onClose={() => setTransitionTarget(null)}
+   624→        orderId={order.id}
+   625→        orderNumber={order.orderNumber}
+   626→        currentStatus={order.status}
+   627→        targetStatus={transitionTarget}
+   628→        onSuccess={handleTransitionSuccess}
+   629→        modal={false}
+   630→      />
+   631→    )}
+   632→    </>
+   633→  )
+   634→}
+   635→
+   636→// ------------------------------------------------------------
+   637→// Skeleton de carga
+   638→// ------------------------------------------------------------
+   639→
+   640→function DetailSkeleton() {
+   641→  return (
+   642→    <div className="space-y-6">
+   643→      {[0, 1, 2, 3].map((i) => (
+   644→        <div key={i} className="space-y-2">
+   645→          <Skeleton className="h-4 w-32" />
+   646→          <div className="rounded-lg border p-3">
+   647→            <Skeleton className="mb-2 h-3 w-3/4" />
+   648→            <Skeleton className="mb-2 h-3 w-1/2" />
+   649→            <Skeleton className="h-3 w-2/3" />
+   650→          </div>
+   651→        </div>
+   652→      ))}
+   653→    </div>
+   654→  )
+   655→}
+   656→
+   657→// ------------------------------------------------------------
+   658→// Tipos de vista (derivados del payload del API)
+   659→// ------------------------------------------------------------
+   660→
+   661→interface OrderItemView {
+   662→  id: string
+   663→  title: string
+   664→  sku: string | null
+   665→  quantity: number
+   666→  unitPrice: number
+   667→  total: number
+   668→}
+   669→
+   670→interface TrackingEventView {
+   671→  id: string
+   672→  status: string
+   673→  message: string | null
+   674→  city: string | null
+   675→  occurredAt: string
+   676→}
+   677→
+   678→interface ShipmentView {
+   679→  id: string
+   680→  carrier: string | null
+   681→  guideNumber: string | null
+   682→  status: string
+   683→  trackingEvents: TrackingEventView[]
+   684→}
+   685→
+   686→interface TransactionView {
+   687→  id: string
+   688→  provider: string
+   689→  type: string
+   690→  amount: number
+   691→  status: string
+   692→  reference: string | null
+   693→  providerTxId: string | null
+   694→}
+   695→
+   696→interface StatusLogView {
+   697→  id: string
+   698→  fromStatus: string | null
+   699→  toStatus: string
+   700→  reason: string | null
+   701→  actor: string | null
+   702→  createdAt: string
+   703→}
+   704→

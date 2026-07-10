@@ -31,7 +31,9 @@ export const ORDER_STATES: OrderStatus[] = [...ORDER_STATUSES]
 export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   NUEVO: ['PENDIENTE_PAGO_TRANSPORTE', 'PREPARANDO', 'CANCELADO'],
   PENDIENTE_PAGO_TRANSPORTE: ['PAGO_TRANSPORTE_CONFIRMADO', 'CANCELADO'],
-  PAGO_TRANSPORTE_CONFIRMADO: ['PREPARANDO', 'CANCELADO'],
+  // Un pedido con transporte confirmado puede ir directo a ENVIADO (despacho)
+  // o pasar por PREPARANDO si se quiere separar la preparación del envío.
+  PAGO_TRANSPORTE_CONFIRMADO: ['PREPARANDO', 'ENVIADO', 'CANCELADO'],
   PREPARANDO: ['ENVIADO', 'CANCELADO'],
   ENVIADO: ['ENTREGADO', 'DEVUELTO'],
   ENTREGADO: [],

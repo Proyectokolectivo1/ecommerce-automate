@@ -13,6 +13,7 @@
 //   y de la lista para refrescar UI.
 
 import { useState } from 'react'
+import { toast } from 'sonner'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Package,
@@ -217,6 +218,41 @@ export function OrderDetailSheet({
   const isCodPendingTransport =
     order?.paymentMethod === 'COD' &&
     order?.status === 'PENDIENTE_PAGO_TRANSPORTE'
+
+  // Estados desde los que se puede despachar directamente (genera guía).
+  const dispatchableStates = ['PREPARANDO', 'PAGO_TRANSPORTE_CONFIRMADO']
+  const canDispatch = order?.status
+    ? dispatchableStates.includes(order.status as string)
+    : false
+  const [dispatching, setDispatching] = useState(false)
+
+  async function handleDispatch() {
+    if (!orderId) return
+    setDispatching(true)
+    try {
+      const res = await fetch(`/api/orders/${orderId}/dispatch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        throw new Error(data?.error ?? `Error ${res.status}`)
+      }
+      toast.success(`Guía generada: ${data.guideNumber}`, {
+        description: `Transportadora: ${data.carrier}`,
+      })
+      void qc.invalidateQueries({ queryKey: ['order', orderId] })
+      void qc.invalidateQueries({ queryKey: ['orders'] })
+      onTransitioned()
+    } catch (err) {
+      toast.error('Error al despachar', {
+        description: err instanceof Error ? err.message : String(err),
+      })
+    } finally {
+      setDispatching(false)
+    }
+  }
 
   return (
     <>
@@ -576,6 +612,20 @@ export function OrderDetailSheet({
                 {/* Acciones / transiciones */}
                 <section className="space-y-2">
                   <SectionTitle icon={ArrowRight}>Acciones</SectionTitle>
+                  {canDispatch && (
+                    <Button
+                      type="button"
+                      className="justify-between bg-emerald-600 hover:bg-emerald-700 text-white"
+                      disabled={dispatching}
+                      onClick={handleDispatch}
+                    >
+                      <span className="flex items-center gap-2">
+                        <Truck className="size-4" />
+                        {dispatching ? 'Despachando…' : 'Despachar y generar guía'}
+                      </span>
+                      <ArrowRight className="size-4" />
+                    </Button>
+                  )}
                   {allowedTransitions.length === 0 ? (
                     <div className="flex items-center gap-2 rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
                       <Ban className="size-4" />

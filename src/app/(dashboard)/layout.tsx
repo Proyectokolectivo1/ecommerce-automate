@@ -8,6 +8,10 @@ import { redirect } from 'next/navigation'
 import { getCurrentUser } from '@/lib/auth'
 import { AppShell } from '@/components/layout/app-shell'
 
+// Arranca el worker de impresión periódico (server-side only).
+// El import tiene efecto secundario: registra el setInterval.
+import '@/lib/print-worker'
+
 export default async function DashboardLayout({
   children,
 }: {
