@@ -6,8 +6,9 @@
 //
 // Notas:
 //   - No requiere auth (es un webhook entrante).
-//   - En producción se debería validar el header `X-Shopify-Hmac-Sha256`
-//     con el secreto compartido. Para el demo se omite.
+//   - Valida el header `X-Shopify-Hmac-Sha256` con el API secret de
+//     Shopify si está configurado; si no hay config, acepta el webhook
+//     (modo demo/sin integración real).
 //   - Se loguea la recepción del webhook para auditoría.
 
 import { NextResponse } from 'next/server'
@@ -17,6 +18,7 @@ import {
   OrderTransitionError,
 } from '@/modules/orders/order.service'
 import type { ShopifyOrderInput } from '@/modules/orders/types'
+import { getShopifyConfig, verifyShopifyWebhook } from '@/integrations/shopify/client'
 
 export async function POST(request: Request) {
   // --- Headers de Shopify (para logging) ---------------------------
@@ -32,10 +34,23 @@ export async function POST(request: Request) {
     hmacPresent: Boolean(shopifyHmac),
   })
 
+  // --- Body crudo (para verificación HMAC) -------------------------
+  const rawBody = await request.text()
+
+  // --- Verificación HMAC (si Shopify está configurado) ------------
+  const shopifyConfig = await getShopifyConfig()
+  if (shopifyConfig?.apiSecret) {
+    const valid = verifyShopifyWebhook(rawBody, shopifyHmac, shopifyConfig.apiSecret)
+    if (!valid) {
+      logger.warn('shopify.webhook invalid-hmac', { webhookId, domain: shopifyDomain })
+      return NextResponse.json({ ok: false, error: 'HMAC inválido' }, { status: 401 })
+    }
+  }
+
   // --- Parse body ---------------------------------------------------
   let payload: ShopifyOrderInput
   try {
-    payload = (await request.json()) as ShopifyOrderInput
+    payload = JSON.parse(rawBody) as ShopifyOrderInput
   } catch {
     logger.warn('shopify.webhook invalid-json', { webhookId })
     return NextResponse.json(

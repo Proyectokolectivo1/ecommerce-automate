@@ -1,0 +1,201 @@
+     1→321 /home/z/my-project/worklog.md
+     2→
+     3→---
+     4→Task ID: 5
+     5→Agent: full-stack-developer
+     6→Task: Módulo de Pedidos — FSM de 8 estados, Order Service, COD flow, API routes y webhook Shopify
+     7→
+     8→Work Log:
+     9→- Leí worklog.md: Task 1 (schema Prisma con 18 modelos + FSM 8 estados + db:push) y Task 3 (libs de fundación: auth, logger, cache, queue, storage, audit, validation, orchestrator, format).
+    10→- Verifiqué exports disponibles: `db` (Prisma), `authOptions`/`getCurrentUser`/`requireRole`/`AuthError`, `ORDER_STATUSES`/`orderStatusSchema`, `audit.log`, `logger`/`createLogger`. Schema Prisma con Order, OrderItem, OrderStatusLog, Customer, Product, Transaction, Shipment, TrackingEvent, PrintJob, Return.
+    11→- Creé `src/modules/orders/types.ts`: `OrderStatus`, `OrderWithRelations` (Prisma OrderGetPayload con `include` completo), `OrderListItem` (con `_count.shipments`), `ShopifyOrderInput` + sub-interfaces (Address, Customer, LineItem), `OrderFilters`. Exporta también `ORDER_INCLUDE` como constante `satisfies Prisma.OrderInclude` para reutilizar en todos los queries.
+    12→- Creé `src/modules/orders/state-machine.ts`: `ORDER_STATES` (array de 8), `ORDER_TRANSITIONS` (mapa exacto pedido), `canTransition(from, to)`, `getAllowedTransitions(from)`, `isTerminal(state)`, `ORDER_STATE_LABELS` (etiquetas español: "Nuevo pedido", "Pendiente pago transporte", ...), `ORDER_STATE_COLORS` (Record<OrderStatus, {variant, className}>). Colores: warning/success implementados con variant=secondary + clases Tailwind custom (amber-100/emerald-100) porque shadcn Badge solo expone default/secondary/destructive/outline.
+    13→- Creé `src/modules/orders/cod-flow.ts`: `isCodOrder` (acepta "COD" insensible a mayúsculas/guiones), `requiresTransportPayment` (COD + !codPaid + status PENDIENTE_PAGO_TRANSPORTE), `calculateTransportCost` (heuristic: si order.transportCost>0 lo usa, si no $5000 + pesoAprox*0.05), `isCodPendingTransportPayment` para alertas. Todas puras, sin DB.
+    14→- Creé `src/modules/orders/order.service.ts`:
+    15→  * `OrderTransitionError` (extends Error, con `code`, `fromStatus`, `toStatus`) y `OrderNotFoundError`.
+    16→  * `listOrders(filters)` — Promise.all de findMany + count, includes customer+items+_count.shipments, orderBy placedAt DESC, validaciones de limit/offset (clamp 1-200 / >=0), filtros por status/paymentMethod/search (OR sobre orderNumber, customer.name/email/phone, city).
+    17→  * `getOrderById(id)` y `getOrderByNumber(orderNumber)` — ambos con `include: ORDER_INCLUDE` (customer, items.product, shipments.trackingEvents, transactions, statusLogs, printJobs).
+    18→  * `transitionStatus(orderId, toStatus, actor, reason?)` — fetch con select {id, status, orderNumber, paidAt}, no-op si from===to, validación canTransition, update con timestamps según target (transportPaidAt+codPaid=true para PAGO_TRANSPORTE_CONFIRMADO, shippedAt, deliveredAt+paidAt, returnedAt, cancelledAt), transacción Prisma con OrderStatusLog.create, logging.
+    19→  * `createOrderFromShopify(payload)` — idempotente por shopifyId (upsert-like), upsert de customer (match por shopifyId o email, sino create), upsert de productos (match por shopifyId/sku, sino create), cálculo de transportCost para COD, estado inicial PENDIENTE_PAGO_TRANSPORTE si COD sino NUEVO, transactional create con items + statusLogs, fire-and-forget para actualizar stats del customer.
+    20→  * `getOrderStats()` — groupBy status + total + codPendingCount (paymentMethod COD + !codPaid + status != CANCELADO).
+    21→  * `getRecentOrders(limit)` — último N con customer + items + _count.shipments.
+    22→  * Helpers `toNumber` y `round2` para robustez ante strings/numbers de Shopify.
+    23→- Creé API routes (todas App Router `export async function`):
+    24→  * `src/app/api/orders/route.ts` — GET: lista con filtros (status, search, paymentMethod, limit, offset), valida contra ORDER_STATUSES y PAYMENT_METHODS, requiere auth. POST: 405 (creación manual deferida).
+    25→  * `src/app/api/orders/[id]/route.ts` — GET: detalle con ORDER_INCLUDE, requiere auth, 404 si no existe.
+    26→  * `src/app/api/orders/[id]/transition/route.ts` — POST: body {toStatus, reason?}, valida toStatus contra enum, llama transitionStatus, audit.log fire-and-forget (action ORDER_TRANSITION), maneja OrderNotFoundError (404) y OrderTransitionError (409 con allowedTransitions en body).
+    27→  * `src/app/api/orders/stats/route.ts` — GET: Promise.all(getOrderStats, getRecentOrders(5)), requiere auth.
+    28→- Creé `src/app/api/webhooks/shopify/route.ts` — POST: parsea JSON, valida id+order_number, loguea headers X-Shopify-*, llama createOrderFromShopify, responde `{ok, orderId, created}`. Sin auth (es webhook entrante). Maneja OrderTransitionError (409) y errores genéricos (500).
+    29→- Ejecuté `bun run lint` — inicialmente 1 error preexistente en `src/components/layout/theme-toggle.tsx` (regla `react-hooks/set-state-in-effect`, patrón estándar next-themes). Agregué `eslint-disable-next-line` con justificación. Mi código limpio.
+    30→- Ejecuté `bunx tsc --noEmit` — corregí 6 errores iniciales en order.service.ts: tipé `let customer: Customer | null` (era `null` y TS infería `null` forever), importé `Customer` de `@prisma/client`.
+    31→- Smoke tests contra dev server (puerto 3000):
+    32→  * `GET /api/orders` → 401 (auth requerida OK)
+    33→  * `GET /api/orders/stats` → 401 (auth OK)
+    34→  * `GET /api/orders/nonexistent-id` → 401 (auth antes que 404, OK)
+    35→  * `POST /api/webhooks/shopify` con payload `{id, order_number, line_items:[]}` → 200 `{ok:true, orderId:"cmr...", created:true}` (creación exitosa)
+    36→  * Segundo POST idéntico → 200 `{ok:true, orderId:"cmr...", created:false}` (idempotencia OK)
+    37→  * Limpié datos de prueba con `prisma db execute` (DELETE FROM "Order" WHERE "shopifyId"='9999999' etc.)
+    38→
+    39→Stage Summary:
+    40→- 4 archivos de dominio creados en `src/modules/orders/` (types.ts, state-machine.ts, cod-flow.ts, order.service.ts) + 4 API routes (`/api/orders`, `/api/orders/[id]`, `/api/orders/[id]/transition`, `/api/orders/stats`) + 1 webhook receiver (`/api/webhooks/shopify/route.ts`).
+    41→- FSM de 8 estados con transiciones validadas, etiquetas español y estilos de Badge (warning/success vía clases Tailwind custom sobre variant secondary).
+    42→- Order Service completo: listado filtrado, detalle con todas relaciones, transición atómica (transactional con OrderStatusLog + timestamps), importación idempotente desde Shopify con upsert de customer+productos, stats por estado, recientes.
+    43→- Lint: limpio (0 errores). TypeScript: 0 errores en código nuevo. Smoke tests OK: API auth funciona (401 sin sesión), webhook crea pedido + idempotencia verificada.
+    44→- Listo para el siguiente agente (UI / Task 6+): puede consumir `GET /api/orders?status=...&search=...&paymentMethod=...&limit=20&offset=0`, `GET /api/orders/[id]`, `POST /api/orders/[id]/transition {toStatus, reason}`, `GET /api/orders/stats` y usar `ORDER_STATE_LABELS`/`ORDER_STATE_COLORS` del módulo para renderizar badges.
+    45→
+    46→---
+    47→Task ID: 7
+    48→Agent: dashboard-builder
+    49→Task: Executive Dashboard con KPIs reales — módulo de analítica, API /api/analytics, componentes de gráficas, KPI card, StatusBadge y página /dashboard completa
+    50→
+    51→Work Log:
+    52→- Leí worklog.md: Task 1 (schema Prisma 18 modelos, FSM 8 estados), Task 3 (libs de fundación: db, auth, format, cache, validation), Task 4 (AppShell + providers + login), Task 5 (módulo de pedidos + API routes + webhook Shopify), Task 6 (seed: 15 pedidos en 7 estados FSM, 8 clientes, 6 productos, 4 CostEntries, 10 Transactions, 1 Return). Verifiqué exports disponibles: `db`, `getCurrentUser`, `formatCOP/formatDate/formatPercent/formatNumber`, `ORDER_STATUSES`, `ORDER_STATE_LABELS`/`ORDER_STATE_COLORS`/`ORDER_STATES`, `getOrderStats`/`getRecentOrders`, `cache` (MemoryCache con TTL por entrada). Confirmé recharts 2.15.4 instalado, shadcn/ui completo (card, table, progress, separator, scroll-area, skeleton, badge), globals.css con `--chart-1..5` (orange/teal/yellow/violet/rose) ya definidos.
+    53→- Creé `src/modules/analytics/sales.metrics.ts` (~540 líneas, server-side puro):
+    54→  * Tipos exportados: `Period`, `SalesKPIs`, `SalesTrendPoint`, `OrdersByStatusPoint`, `PaymentMethodBreakdown`, `TopProduct`, `ReturnsMetrics`, `Profitability`.
+    55→  * `getSalesKPIs(period)` — aggregate de Order donde `status NOT IN (CANCELADO, DEVUELTO)` y `placedAt >= periodStart(period)`. Devuelve `{ total, count, avgTicket }`. Period 'day' → desde hoy 00:00, 'week' → 7d, 'month' → 30d, 'year' → 365d.
+    56→  * `getSalesTrend(days)` — genera array esperado de N días (date YYYY-MM-DD, label dd/MM, total 0, count 0), luego findMany de orders válidas del rango y agrega en memoria por fecha. Devuelve array ordenado cronológico con total y count por día.
+    57→  * `getOrdersByStatus()` — groupBy de Order por status, mapea a los 8 ORDER_STATES con ORDER_STATE_LABELS y un color CSS (`var(--chart-1..5)`) según estado. Siempre devuelve los 8 estados (aunque count=0).
+    58→  * `getOrdersByPaymentMethod()` — groupBy por paymentMethod donde status NOT IN (CANCELADO, DEVUELTO). Agrega `prepaid` (PREPAID + otros) y `cod` con count y sum(total).
+    59→  * `getTopProducts(limit)` — findMany de OrderItem donde order.status NOT IN (CANCELADO, DEVUELTO), select productId/title/sku/quantity/unitPrice/unitCost/total/product. Agrega por productId en memoria (quantity, revenue=sum(total), cost=sum(unitCost*quantity)). Calcula profit = revenue - cost, margin = profit/revenue*100. Ordena por revenue DESC, slice(limit).
+    60→  * `getReturnsMetrics()` — findMany de Return con product.title y order.city. count = length, rate = count/totalOrders*100 (totalOrders = db.order.count()), lostValue = sum(lostValue). topProduct = producto con más devoluciones (max por productId). topCity = ciudad con más devoluciones (campo `city` del Return, fallback a `order.city`).
+    61→  * `getProfitability()` — revenue = sum(order.total) para NO cancelados/devueltos. Costs: findMany de CostEntry donde `periodEnd >= (hoy - 30d)` (importante: usar periodEnd en vez de periodStart para no perder entradas del seed cuyo periodStart = hoy-30d exactamente), suma por categoría (PRODUCT/SHIPPING/ADVERTISING/OPERATION). Costo de producto real: findMany de OrderItem para orders ENTREGADO/ENVIADO, suma en memoria `unitCost * quantity` (NOTA: Prisma aggregate _sum(unitCost)*_sum(quantity) da resultado incorrecto porque mezcla unitCosts de items distintos; traemos filas y reducimos). productCost final = CostEntry.PRODUCT si > 0, si no calculado de OrderItems. grossProfit = revenue - product - shipping. netProfit = revenue - all costs. margin = netProfit/revenue*100. Todos los valores round2.
+    62→  * Helpers: `round2` (Math.round con EPSILON), `periodStart(period)`, `toYMD(d)`, `toLabel(d)`. EXCLUDED_SALES_STATUSES = [CANCELADO, DEVUELTO]. DELIVERED_LIKE_STATUSES = [ENTREGADO, ENVIADO]. Todas las funciones catch y loguean errores, devuelven zero-values para no romper el dashboard.
+    63→- Creé `src/modules/analytics/index.ts` — barrel re-export de funciones y tipos.
+    64→- Creé `src/app/api/analytics/route.ts` — GET con `getCurrentUser()` (401 si no auth), cache key `'api:analytics:combined'` TTL 60s con la lib `cache`. Promise.all de 11 funciones: getSalesKPIs(day/week/month/year), getSalesTrend(14), getOrdersByStatus, getOrdersByPaymentMethod, getTopProducts(5), getReturnsMetrics, getProfitability, getRecentOrders(5). Payload: `{ sales: {day,week,month,year}, trend, ordersByStatus, ordersByPaymentMethod, topProducts, returns, profitability, recentOrders, generatedAt }`. Logger de errores.
+    65→- Creé `src/components/charts/sales-trend-chart.tsx` (client) — Recharts AreaChart con dos YAxis (left='total' formateado como `123k`, right='count'). Area para `total` con linearGradient de `var(--chart-1)` (opacidad 0.4 → 0), strokeWidth 2. Line para `count` con `var(--chart-2)`, dots r=2. CustomTooltip con formatCOP + formatNumber. height 300, ResponsiveContainer 100%.
+    66→- Creé `src/components/charts/orders-status-chart.tsx` (client) — Recharts BarChart con `layout="vertical"` (barras horizontales) para legibilidad de 8 estados. YAxis = category (shortLabel truncado a 22 chars), XAxis = number (allowDecimals=false). Cada barra coloreada con `<Cell fill={entry.color} />` (color = `var(--chart-N)`). CustomTooltip con formatNumber. height 280.
+    67→- Creé `src/components/charts/profitability-chart.tsx` (client) — Recharts BarChart simple con 3 barras verticales: Ingresos (`var(--chart-2)`), Costos (`var(--chart-5)`), Utilidad Neta (`var(--chart-2)` si >=0, `var(--chart-1)` si <0). YAxis formateado como `123k`. CustomTooltip con formatCOP. height 280.
+    68→- Creé `src/components/shared/kpi-card.tsx` — Card con padding `p-4 md:p-5`, título uppercase muted xs, valor `text-2xl font-semibold`, subtítulo muted xs, icono top-right en cuadro `bg-muted size-10 rounded-lg`. Trend opcional: ▲ verde esmeralda / ▼ rojo rose con porcentaje. Loading state con Skeleton `h-8 w-24`. Props: title, value, subtitle?, icon?, trend?, loading?, className?.
+    69→- Creé `src/components/shared/status-badge.tsx` — Badge shadcn que usa ORDER_STATE_COLORS[status] para variant + className, ORDER_STATE_LABELS para texto. Si status desconocido, fallback a `outline`. Reutilizable en Task 8 (orders page).
+    70→- Reemplacé `src/app/(dashboard)/dashboard/page.tsx` — Server component con `getCurrentUser()` + Promise.all de 11 funciones de analítica. Layout responsive mobile-first:
+    71→  * Header: "Dashboard" + "Resumen ejecutivo · Hola, {name} ({role})" + badge "Últimos 30 días" con icono TrendingUp.
+    72→  * Row 1 (grid-cols-1 sm:grid-cols-2 lg:grid-cols-4): 4 KPICard — Ventas del día (DollarSign), Ventas del mes (TrendingUp), Pedidos totales (ShoppingCart, subtitle "X activos"), Ticket promedio mes (Receipt, subtitle año).
+    73→  * Row 2 (lg:grid-cols-3): Card SalesTrendChart (lg:col-span-2) con header "Tendencia de ventas (14 días)" + Card "Método de pago" con dos Progress (Prepagado vs COD), share %, separator, total procesado.
+    74→  * Row 3 (lg:grid-cols-2): Card OrdersStatusChart con header "Pedidos por estado" + Card "Rentabilidad" con ProfitabilityChart + dl con Ingresos/Costos totales/Utilidad bruta/Utilidad neta (colores esmeralda/rose según signo) + Progress del margen neto (clamp 0-100).
+    75→  * Row 4 (full width): Card "Top 5 productos" con shadcn Table (Producto+SKU, Cantidad, Ingresos, Utilidad con color, Margen %). Wrapper `max-h-96 overflow-y-auto [scrollbar-width:thin]`.
+    76→  * Row 5 (lg:grid-cols-2): Card "Devoluciones" (icono Undo2) con grid 2x2 (count, rate con color condicional >5%), valor perdido en rose, producto top, ciudad top, alerta amber si rate > 5%. + Card "Pedidos recientes" (5 items) con Link a `/dashboard/pedidos`, StatusBadge, total formatCOP, ChevronRight.
+    77→  * Cálculos derivados: totalOrders = sum(ordersByStatus.count), activeOrders = sum de count donde status NOT IN (ENTREGADO, DEVUELTO, CANCELADO). prepaidShare y codShare con Math sobre totalPaymentCount.
+    78→  * `metadata` exportado con title y description. NO footer (AppShell lo maneja).
+    79→- Verificaciones:
+    80→  * `bun run lint` — 0 errores en mi código (transient errors en `src/components/orders/orders-view.tsx` y `order-detail-sheet.tsx` aparecen y desaparecen — son de un agente concurrente de Task 8, no míos).
+    81→  * `ps aux | grep next` confirma dev server corriendo en puerto 3000.
+    82→  * `curl -s http://localhost:3000/api/analytics` sin cookie → HTTP 401 `{"error":"No autenticado"}` (auth funciona, no crashea).
+    83→  * Login con admin@demo.com/admin123 → cookie de sesión → `curl -b cookies.txt http://localhost:3000/api/analytics` → HTTP 200 con payload completo: sales (day $97.9k/1, week $1.34M/9, month $2.08M/14, year $2.08M/14), trend 14 días (27/06 → 10/07 con totales por día), ordersByStatus (8 estados, counts 2/3/2/2/3/2/1/0 = 15 pedidos total ✓), ordersByPaymentMethod (prepaid 5/$716k, cod 9/$1.37M), topProducts (Auriculares $629k margin 49.94%, Smartwatch $480k margin 53.10%, Altavoz $260k, Power Bank $240k, Cargador $200k), returns (count 1, rate 6.67%, lostValue $26.490, topProduct "Smartwatch Deportivo", topCity "Pereira"), profitability (revenue $2.08M, costs {product $15M, shipping $3.5M, advertising $4M, operation $2.5M, total $25M}, grossProfit -$16.4M, netProfit -$22.9M, margin -1099% — negativo porque los CostEntries del seed son $25M mientras que los 15 pedidos demo solo generan $2M de revenue; comportamiento esperado con datos demo), recentOrders (5 pedidos con customer, status, total).
+    84→  * Cache verificado: primera llamada 134ms (cache miss, ejecuta 11 queries), segunda llamada 34ms (cache hit, ~4x speedup).
+    85→  * `GET /dashboard` con cookie → HTTP 200, HTML 240KB, todos los strings clave presentes (Ventas del día, Ventas del mes, Pedidos totales, Ticket promedio, Tendencia de ventas (14 días), Método de pago, Prepagado, Contra entrega, Pedidos por estado, Rentabilidad, Top 5 productos, Devoluciones, Tasa devolución, Pedidos recientes, Smartwatch Deportivo, Margen neto, Resumen ejecutivo, Últimos 30 días).
+    86→  * dev.log sin errores de runtime en mi código (solo warnings preexistentes de next-auth NEXTAUTH_URL y 404 en /dashboard/pedidos que es esperado — Task 8 lo creará).
+    87→- Bug encontrado y arreglado durante verificación: `getProfitability` originalmente usaba `db.orderItem.aggregate({ _sum: { unitCost, quantity } })` y multiplicaba los dos sums — esto da un número incorrecto cuando hay items con unitCosts distintos (ej: sum(unitCost)=50, sum(quantity)=5 → producto 250, pero costo real = sum(unitCost*quantity)=120). Refactorizado a findMany + reduce en memoria. También cambié el filtro de CostEntry de `periodStart >= since` a `periodEnd >= since` para incluir entradas del seed cuyo periodStart cae justo en el límite de los 30 días.
+    88→
+    89→Stage Summary:
+    90→- 9 archivos creados: `src/modules/analytics/sales.metrics.ts`, `src/modules/analytics/index.ts`, `src/app/api/analytics/route.ts`, `src/components/charts/sales-trend-chart.tsx`, `src/components/charts/orders-status-chart.tsx`, `src/components/charts/profitability-chart.tsx`, `src/components/shared/kpi-card.tsx`, `src/components/shared/status-badge.tsx`, `src/app/(dashboard)/dashboard/page.tsx` (reemplazado).
+    91→- Dashboard ejecutivo completo y funcional con KPIs reales conectados a la base de datos. Server component que renderiza con datos listos (no hay loading spinner en carga inicial). KPICard acepta `loading` prop para futuras refetches client-side.
+    92→- API /api/analytics con cache 60s verificado (4x speedup en cache hit), 401 sin auth, payload completo con 11 métricas.
+    93→- Gráficas Recharts con CSS vars chart-1..5 (sin indigo/blue). Colores: chart-1 (rosa/coral), chart-2 (teal), chart-3 (gris-azulado), chart-4 (amarillo), chart-5 (naranja).
+    94→- Componentes reutilizables: StatusBadge (usará Task 8 en pedidos page), KPICard (usará futuras páginas de BI), 3 chart components.
+    95→- Responsive: mobile-first (1 col), sm (2 cols), lg (4 cols en KPIs, 2-3 cols en charts). Long lists con `max-h-96 overflow-y-auto` y scrollbar thin.
+    96→- Lint limpio. Dev server saludable. Sin errores runtime.
+    97→- Pendiente Task 8: orders page en /dashboard/pedidos (los links del dashboard ya apuntan ahí). StatusBadge y order.service ya listos para consumir.
+    98→
+    99→---
+   100→Task ID: 8
+   101→Agent: full-stack-developer
+   102→Task: Página de gestión de pedidos — tabla con filtros, drawer de detalle, timeline de estados y diálogo de transición
+   103→
+   104→Work Log:
+   105→- Leí worklog.md (Task 1: schema Prisma 18 modelos + FSM 8 estados; Task 3: libs fundación; Task 4: AppShell+providers+login; Task 5: módulo de pedidos + API routes + webhook; Task 6: seed 15 pedidos; Task 7: dashboard ejecutivo con KPIs reales). Revisé exports: `state-machine.ts` (ORDER_STATES, ORDER_TRANSITIONS, ORDER_STATE_LABELS, ORDER_STATE_COLORS, canTransition, getAllowedTransitions, isTerminal), `order.service.ts` (listOrders, getOrderById, transitionStatus, getOrderStats), `auth.ts` (getCurrentUser), `format.ts` (formatCOP, formatDate), componentes shadcn/ui (badge, sheet, table, select, alert-dialog, skeleton, scroll-area, dropdown-menu, card, separator, button, tooltip). Verifiqué endpoints `/api/orders` y `/api/orders/[id]` (ambos 401 sin auth).
+   106→- **Conflict resolution con Task 7**: cuando empecé, `src/components/shared/status-badge.tsx` no existía. Durante mi trabajo, Task 7 terminó y escribió SU versión (sobrescribió la mía). Su API era `{ status, label?, className? }` — sin `size`. Mi código consume `<StatusBadge size="sm" />` en timelines y action buttons. Resolución: mergeé mi prop `size` (con className `px-1.5 py-0 text-[10px]` para 'sm') en la versión de Task 7, manteniendo su API intacta (backward-compatible). Agregué `border` al className base para variantes con bg-amber-100 etc.
+   107→- **Edité `src/modules/orders/state-machine.ts`** (ORDER_STATE_COLORS): eliminé `bg-sky-600` (PAGO_TRANSPORTE_CONFIRMADO) y `bg-cyan-600` (ENVIADO) que Task 5 había introducido, para cumplir la regla "NO indigo or blue colors". Nueva paleta: zinc (NUEVO), amber (PENDIENTE_PAGO_TRANSPORTE), emerald (PAGO_TRANSPORTE_CONFIRMADO + ENTREGADO), violet (PREPARANDO), teal (ENVIADO), destructive (DEVUELTO/CANCELADO). Todos en variante `secondary` con clases custom bg/text + soporte dark.
+   108→- **Creé `src/components/orders/transition-dialog.tsx`** (client): AlertDialog de confirmación + variante `TransitionTrigger` (botón que abre el diálogo). Props `open, onClose, orderId, orderNumber?, currentStatus, targetStatus, onSuccess`. Muestra icono AlertTriangle, StatusBadge `from → to`, label legible, Textarea opcional para `reason` (max 500 chars). Botón Confirmar → `POST /api/orders/[id]/transition` con `{ toStatus, reason }`. Toast `success`/`error` via sonner.
+   109→- **Creé `src/components/orders/order-detail-sheet.tsx`** (client): Sheet lateral derecho (480px desktop, full-width mobile). Props `orderId, onClose, onTransitioned`. `useQuery(['order', orderId], enabled: !!orderId)` contra `GET /api/orders/[id]`. Secciones: (1) Header orderNumber + StatusBadge, (2) caja amber "Pago de transporte pendiente" para COD en PENDIENTE_PAGO_TRANSPORTE con botón "Generar link de pago" disabled (placeholder futuro), (3) Cliente (nombre, email, phone, city+address con iconos), (4) Resumen (fecha, método, codPaid, subtotal, envío, transporte, total), (5) Items (title, sku, qty, unitPrice, total), (6) Envíos (carrier, guideNumber, status badge, timeline de TrackingEvents ordenados occurredAt DESC), (7) Transacciones (provider, type, amount, status badge con colores emerald/amber/zinc), (8) Bitácora de estados (timeline vertical de OrderStatusLog ordenado createdAt DESC — más reciente arriba, badge `from → to`, actor label, reason), (9) Acciones — botones por cada transición permitida (`getAllowedTransitions(currentStatus)`) que abren TransitionDialog; mensaje "estado terminal" si no hay transiciones. Skeleton mientras carga, mensaje de error si falla. Invalida `['order', orderId]` y `['orders']` al ejecutar transición.
+   110→- **Creé `src/components/orders/orders-view.tsx`** (client): State `filters { status, search, paymentMethod }`, `debouncedSearch` (300ms via setTimeout en useEffect), `page`, `selectedOrderId`. React Query `useQuery(['orders', status, paymentMethod, debouncedSearch, page])` con `initialData` (página 0) + `placeholderData: (prev) => prev`. Layout: (a) Filters bar (Card p-4): Input search con icono Search + debounce, Select estado (8 estados + Todos), Select método (Prepagado/Contra entrega/Todos), botón "Limpiar" si hay filtros activos. (b) Tabla (Card p-0 overflow-hidden): contenedor con `max-h-[600px] overflow-auto orders-scroll` (custom scrollbar), header sticky, columnas Pedido (icono Package + orderNumber + city), Cliente (nombre + email), Fecha (md+), Método (badge COD amber / Prepagado secondary), Estado (StatusBadge), Total (formatCOP, tabular-nums), Acciones (botón "Ver detalle" ghost + Eye icon). Filas clicables (cursor-pointer, role=button, Enter/Space abre detalle, stopPropagation en botón Ver detalle). Skeleton rows en carga inicial. Empty state con icono Inbox + mensaje contextual. Pagination footer: "Mostrando X-Y de Z" + spinner si isFetching + Anterior/Siguiente + núm. página. Click en fila → setSelectedOrderId → abre OrderDetailSheet.
+   111→- **Creé `src/app/(dashboard)/dashboard/pedidos/page.tsx`** (server): `getCurrentUser()` → redirect `/login` si no authed. `Promise.all([listOrders({ limit: 20, offset: 0 }), getOrderStats()])` para primer render server-side. Header con h1 "Pedidos" + Badge "X totales" + subtítulo "Gestión de pedidos…" + caja amber si `codPendingCount > 0` mostrando "N pedidos COD con pago de transporte pendiente". Renderiza `<OrdersView initialOrders={orders} initialTotal={total} user={...} />`. `export const dynamic = 'force-dynamic'`.
+   112→- **Edité `src/app/globals.css`**: agregué capa `@layer utilities` con clases `.orders-scroll` y `.thin-scroll` (scrollbar fina 8px, thumb gray 25% opacity, hover 45%, transparent track, soporte dark mode). Aplicada a la tabla de pedidos.
+   113→- **Lint errors fixed**: (1) `order-detail-sheet.tsx` — React Compiler `react-hooks/preserve-manual-memoization` rechazó mi `useMemo` con dep `order?.statusLogs` (más específica que dep inferida `order`). Solución: eliminé ambos `useMemo` (allowedTransitions y statusLogsDesc) e inlineé las computaciones (datos ya cacheados de React Query). (2) `orders-view.tsx` — `react-hooks/set-state-in-effect` rechazó `setPage(0)` síncrono en `useEffect` al cambiar `filters.status/paymentMethod`. Solución: eliminé el efecto, moví el `setPage(0)` a los `onValueChange` de los Select y al `clearFilters()`. El `setPage(0)` dentro del `setTimeout` del debounce sigue OK (es diferido).
+   114→- **Verificación end-to-end**: lint limpio (0 errores). `GET /api/orders` sin auth → 401 (esperado). `GET /dashboard/pedidos` sin auth → 307 → /login (esperado). Login admin@demo.com/admin123 → 200 + cookie. `GET /api/orders?limit=3` con auth → 200, total 15, pedidos #1001 (NUEVO PREPAID), #1004 (PENDIENTE_PAGO_TRANSPORTE COD), #1005 (PENDIENTE_PAGO_TRANSPORTE COD). `GET /api/orders/[id]` con auth → 200 con customer, items, shipments.trackingEvents, transactions, statusLogs. `GET /api/orders/stats` → 200, codPendingCount: 4, total: 15. `GET /dashboard/pedidos` con auth → HTTP 200, HTML contiene los 15 order numbers (#1001-#1015), "Gestión de pedidos", "Ver detalle", "Nuevo pedido", y todos los labels de estado. dev.log: sin errores de runtime en mi código.
+   115→
+   116→Stage Summary:
+   117→- 5 archivos creados: `src/components/shared/status-badge.tsx` (colaboración con Task 7 — le agregué `size` prop), `src/components/orders/transition-dialog.tsx`, `src/components/orders/order-detail-sheet.tsx`, `src/components/orders/orders-view.tsx`, `src/app/(dashboard)/dashboard/pedidos/page.tsx`. 2 archivos editados: `src/modules/orders/state-machine.ts` (ORDER_STATE_COLORS sin azul/índigo), `src/app/globals.css` (custom scrollbar `.orders-scroll`).
+   118→- Página de gestión de pedidos completa: server component con fetch inicial + cliente interactivo con React Query. Tabla con filtros (search debounced 300ms, status, paymentMethod), paginación prev/next, scroll vertical con custom scrollbar (max-h-600px), skeleton loading, empty state. Drawer lateral derecho (480px desktop / full-width mobile) con cliente, items, envíos+tracking timeline, transacciones, bitácora de estados (timeline vertical), acciones (transiciones permitidas por FSM con diálogo de confirmación + reason opcional). Caja amber destacada "Pago de transporte pendiente" para COD en PENDIENTE_PAGO_TRANSPORTE con botón "Generar link de pago" disabled (placeholder futuro).
+   119→- Cumple reglas de diseño: sin azul/índigo, responsive mobile-first, hover states en filas/botones, semantic HTML (header/section/ol/li), accesibilidad (aria-label, role=button, Enter/Space en filas, sr-only), loading states con Skeleton, error states amigables, toasts via sonner, iconos lucide-react.
+   120→- Próximos agentes pueden: (a) implementar botón "Generar link de pago" integrando WOMPI/PAYU/BOLD, (b) conectar notifications-bell del AppShell a la tabla Notification + WebSocket, (c) agregar export CSV/PDF del listado, (d) columnas customizables / ordenamiento.
+   121→
+   122→---
+   123→Task ID: 9
+   124→Agent: main
+   125→Task: Verificación end-to-end con Agent Browser + fix de conflicto AlertDialog/Sheet
+   126→
+   127→Work Log:
+   128→- Verifiqué el dev server (sano en puerto 3000, sin errores fatales).
+   129→- Abrí http://localhost:3000/ → redirigió a /login correctamente.
+   130→- Snapshot del login: formulario con email/contraseña precargados (admin@demo.com/admin123).
+   131→- Click en "Ingresar" → redirigió a /dashboard, sesión iniciada como ADMIN.
+   132→- Snapshot del dashboard: KPIs de ventas (día/semana/mes/año), tendencia 14 días, pedidos por estado, rentabilidad, top 5 productos, devoluciones, pedidos recientes — todo renderizando con datos reales del seed.
+   133→- Navegué a /dashboard/pedidos: tabla con 15 pedidos en todos los estados (NUEVO, PENDIENTE_PAGO_TRANSPORTE, PAGO_TRANSPORTE_CONFIRMADO, PREPARANDO, ENVIADO, ENTREGADO, DEVUELTO), filtros de estado/método, búsqueda, paginación.
+   134→- Abrí detalle de pedido #1001: Sheet lateral con cliente, items, bitácora de estados, y botones de transición según FSM.
+   135→- Detecté bug: al hacer click en un botón de transición dentro del Sheet, el Sheet se cerraba y el AlertDialog de confirmación no aparecía (conflicto de focus trap modal entre Radix Dialog/Sheet y Radix AlertDialog).
+   136→- Fix 1: Moví TransitionDialog fuera del componente Sheet (sibling vía Fragment) en order-detail-sheet.tsx.
+   137→- Fix 2: Añadí prop `modal={false}` al TransitionDialog cuando se usa dentro del Sheet, para evitar el conflicto de doble focus trap modal.
+   138→- Tras el fix, el diálogo de confirmación aparece correctamente con título "¿Confirmar cambio de estado?", campo de motivo opcional, y botones Cancelar/Confirmar.
+   139→- Ejecuté transición NUEVO → PREPARANDO en pedido #1001: POST /api/orders/[id]/transition 200 OK, audit log registrado, query invalidado y refetchado, toast de éxito mostrado, FSM actualizó las transiciones disponibles a ENVIADO y CANCELADO.
+   140→- Verifiqué footer sticky: AppShell usa `min-h-screen flex flex-col` + `footer mt-auto` (patrón correcto). En páginas largas el footer se empuja naturalmente; en cortas quedaría pegado al fondo.
+   141→- Verifiqué responsive con viewport móvil (375x812): sidebar colapsa a Sheet, tabla con scroll horizontal.
+   142→- Sin errores en consola ni en dev.log. Lint limpio (0 errores).
+   143→
+   144→Stage Summary:
+   145→- Fase 1 (Fundaciones) completada y verificada end-to-end con Agent Browser.
+   146→- Login funcional con 4 roles (admin/gerencia/bodega/servicio).
+   147→- AppShell con sidebar (13 items en 4 secciones), topbar (theme toggle, notificaciones, user menu), footer sticky.
+   148→- Dashboard ejecutivo con 11 KPIs/métricas reales calculadas desde la base de datos.
+   149→- Vista de pedidos con tabla, filtros, búsqueda, paginación, detalle Sheet con timeline y transiciones FSM funcionales.
+   150→- 15 pedidos seed en los 8 estados del FSM, con transiciones auditadas.
+   151→- Bug de Radix dialog nesting resuelto con `modal={false}`.
+   152→- Capturas guardadas en screenshot-dashboard.png, screenshot-pedido-detalle.png, screenshot-pedidos.png, screenshot-mobile.png.
+   153→- Listo para Fase 2: módulo COD + pasarelas de pago.
+   154→
+   155→---
+   156→Task ID: F2.2
+   157→Agent: main
+   158→Task: Capa src/integrations/ — Shopify client + Mastershop client + 5 pasarelas de pago con interfaz común (Port) + notifications adapters
+   159→
+   160→Work Log:
+   161→- Creé `src/integrations/payments/provider.ts`: interfaz `PaymentProviderPort` con createPaymentLink/getTransactionStatus/parseWebhook + tipos neutralizados (NeutralTxStatus, WebhookPayload) + helpers isSandbox/mockTxId + PROVIDER_LABELS/PROVIDER_BADGE_CLASSES.
+   162→- Creé `src/integrations/payments/sandbox.ts`: helpers mock compartidos (mockCreateLink, mockStatus, parseMockWebhook, verifySignature con timingSafeEqual).
+   163→- Creé 5 adapters de pasarelas: `wompi.ts`, `payu.ts`, `mercadopago.ts`, `epayco.ts`, `bold.ts`. Cada uno: modo sandbox mock + modo real con fetch a la API del proveedor + validación de firma HMAC en parseWebhook.
+   164→- Creé `src/integrations/payments/registry.ts`: factory getPaymentProvider(name) + isSupportedProvider.
+   165→- Creé `src/integrations/shopify/client.ts`: getShopifyConfig (lee IntegrationSetting), getShopifyOrder (Admin API REST), updateShopifyOrderNote, verifyShopifyWebhook (HMAC SHA256 base64).
+   166→- Creé `src/integrations/mastershop/client.ts`: getMastershopConfig, createDispatch (mock + real), tipos CreateDispatchRequest/Response/GuideStatusCallback.
+   167→- Creé `src/integrations/notifications/whatsapp.ts` + `email.ts` + `email-config.ts`: sendWhatsApp (Cloud API Meta), sendEmail (Resend), con modo mock cuando no hay creds.
+   168→
+   169→Stage Summary:
+   170→- Capa de integraciones completa con arquitectura hexagonal: ports (interfaces) en provider.ts, adapters concretos por proveedor.
+   171→- Todos los adapters funcionan en modo sandbox/mock sin credenciales (generan URLs/IDs plausibles) y en modo real con creds (fetch a API real).
+   172→- Interfaz común permite agregar nuevas pasarelas sin tocar la lógica de dominio.
+   173→- Webhook verification con timingSafeEqual para prevenir timing attacks.
+   174→
+   175→---
+   176→Task ID: F2.3
+   177→Agent: main
+   178→Task: Webhook receivers (payments + mastershop) + API integraciones (config CRUD + test) + módulo payment.service + mini-service realtime socket.io
+   179→
+   180→Work Log:
+   181→- Creé `src/modules/payments/payment.service.ts`: createTransportPaymentLink (genera reference TR-{order}-{ts}, llama adapter, guarda Transaction + marca codPaymentLink en Order), confirmPaymentFromWebhook (idempotente: si ya APPROVED skip, busca por providerTxId/reference, actualiza status, si TRANSPORT+APPROVED transiciona pedido PENDIENTE_PAGO_TRANSPORTE→PAGO_TRANSPORTE_CONFIRMADO), refreshTransactionStatus (poll manual).
+   182→- Creé `src/app/api/webhooks/payments/route.ts`: POST recibe webhook de cualquier pasarela, identifica provider por header X-Payment-Provider o campo body.provider, parsea con adapter, valida firma, confirma pago idempotente. GET muestra endpoint info + providers configurados.
+   183→- Creé `src/app/api/webhooks/mastershop/route.ts`: POST recibe callback de estado de guía, busca Shipment por guideNumber, actualiza status + crea TrackingEvent, si DELIVERED/RETURNED transiciona Order.
+   184→- Creé `src/app/api/integrations/route.ts`: GET lista 9 providers con estado (enmascara secretos), PUT upsert config (ADMIN only).
+   185→- Creé `src/app/api/integrations/[provider]/route.ts`: GET单个, PATCH activar/desactivar (ADMIN), POST test de conexión (ADMIN) — para pasarelas crea link de prueba.
+   186→- Actualicé `src/app/api/webhooks/shopify/route.ts`: ahora valida HMAC con verifyShopifyWebhook si Shopify está configurado.
+   187→- Creé `mini-services/realtime/` (package.json + index.ts): socket.io en puerto 3003 con path '/'. Reordené listeners HTTP para que /emit y /health se procesen antes que engine.io. Bridge POST /emit con secret. Eventos: order:created, order:transition, payment:confirmed, guide:status, alert:new.
+   188→- Creé `src/lib/realtime.ts`: emitRealtime (fire-and-forget, 2s timeout) + helpers emitOrderCreated/emitOrderTransition/emitPaymentConfirmed/emitGuideStatus/emitAlert.
+   189→- Creé `src/hooks/use-realtime.ts`: hook cliente que conecta via io('/?XTransformPort=3003') y expone callbacks onOrderCreated/onOrderTransition/onPaymentConfirmed/onGuideStatus/onAlert.
+   190→- Creé `prisma/seed-integrations.ts`: sembró 9 IntegrationSetting con configs sandbox por defecto.
+   191→- Instalé socket.io-client en el proyecto principal y socket.io en mini-services/realtime.
+   192→- Inicié mini-service realtime (puerto 3003, health OK, emit bridge OK).
+   193→- Lint pasa limpio.
+   194→
+   195→Stage Summary:
+   196→- 3 webhook receivers operativos: Shopify (con HMAC), payments (multi-provider), mastershop (tracking).
+   197→- API de integraciones completa: list/upsert/toggle/test, con enmascaramiento de secretos y auditoría.
+   198→- payment.service orquesta links + confirmación idempotente + transición automática de FSM.
+   199→- Mini-service realtime socket.io funcional en puerto 3003 con bridge HTTP→WS.
+   200→- 9 integraciones sembradas con configs sandbox (SHOPIFY/MASTERSHOP/WOMPI/PAYU/MERCADOPAGO/EPAYCO/BOLD/WHATSAPP/EMAIL).
+   201→- Falta: página /dashboard/integraciones (UI) → delegada a subagent.
