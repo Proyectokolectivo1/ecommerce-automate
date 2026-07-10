@@ -1,31 +1,15 @@
-'use client'
+// ============================================================
+// page.tsx — Home redirect
+// ============================================================
+// Server component. Si hay sesión → /dashboard, si no → /login.
 
-export default function Home() {
-  return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
-      minHeight: '100vh',
-      gap: '2rem',
-      padding: '1rem'
-    }}>
-      <div style={{
-        position: 'relative',
-        width: '6rem',
-        height: '6rem'
-      }}>
-        <img
-          src="/logo.svg"
-          alt="Z.ai Logo"
-          style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'contain'
-          }}
-        />
-      </div>
-    </div>
-  )
+import { redirect } from 'next/navigation'
+import { getCurrentUser } from '@/lib/auth'
+
+export default async function Home() {
+  const user = await getCurrentUser()
+  if (user) {
+    redirect('/dashboard')
+  }
+  redirect('/login')
 }
