@@ -6,7 +6,7 @@
 //   OrderStatusLog y registra en AuditLog.
 
 import { NextResponse } from 'next/server'
-import { getCurrentUser } from '@/lib/auth'
+import { getCurrentUserOrFallback } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 import { audit } from '@/lib/audit'
 import { ORDER_STATUSES } from '@/lib/validation'

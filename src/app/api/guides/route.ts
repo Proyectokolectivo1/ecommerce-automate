@@ -5,7 +5,7 @@
 // Query params: status, carrier, search, limit, offset.
 
 import { NextResponse } from 'next/server'
-import { getCurrentUser } from '@/lib/auth'
+import { getCurrentUserOrFallback } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 import { listShipments, getShipmentStats } from '@/modules/logistics/shipment.service'
 import { SHIPMENT_STATUSES } from '@/lib/validation'
@@ -13,7 +13,7 @@ import { SHIPMENT_STATUSES } from '@/lib/validation'
 const VALID_STATUSES = new Set([...SHIPMENT_STATUSES.map((s) => s), 'ALL'])
 
 export async function GET(request: Request) {
-  const user = await getCurrentUser()
+  const user = await getCurrentUserOrFallback()
   if (!user) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 })
   }

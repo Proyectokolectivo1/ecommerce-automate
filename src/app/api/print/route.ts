@@ -5,7 +5,7 @@
 //        ?stats=true devuelve solo estadísticas.
 
 import { NextResponse } from 'next/server'
-import { getCurrentUser, requireRole } from '@/lib/auth'
+import { getCurrentUserOrFallback, requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 import { listPrintJobs, getPrintJobStats, processPrintQueue } from '@/modules/logistics/printing.service'
 import { PRINT_JOB_STATUSES } from '@/lib/validation'

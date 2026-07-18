@@ -2,8 +2,7 @@
 // format.ts — Formatting helpers (COP currency, dates, percent)
 // ============================================================
 
-import { format as formatDateFns, parseISO } from 'date-fns'
-import { es } from 'date-fns/locale'
+import { parseISO } from 'date-fns'
 import { cn } from '@/lib/utils'
 
 export { cn }
@@ -31,7 +30,12 @@ export function formatDate(date: Date | string): string {
   const d = typeof date === 'string' ? parseISO(date) : date
   if (!(d instanceof Date) || Number.isNaN(d.getTime())) return '—'
   try {
-    return formatDateFns(d, 'dd/MM/yyyy HH:mm', { locale: es })
+    const dd = String(d.getUTCDate()).padStart(2, '0')
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0')
+    const yyyy = d.getUTCFullYear()
+    const hh = String(d.getUTCHours()).padStart(2, '0')
+    const min = String(d.getUTCMinutes()).padStart(2, '0')
+    return `${dd}/${mm}/${yyyy} ${hh}:${min}`
   } catch {
     return d.toISOString()
   }
@@ -45,7 +49,10 @@ export function formatDateShort(date: Date | string): string {
   const d = typeof date === 'string' ? parseISO(date) : date
   if (!(d instanceof Date) || Number.isNaN(d.getTime())) return '—'
   try {
-    return formatDateFns(d, 'dd/MM/yyyy', { locale: es })
+    const dd = String(d.getUTCDate()).padStart(2, '0')
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0')
+    const yyyy = d.getUTCFullYear()
+    return `${dd}/${mm}/${yyyy}`
   } catch {
     return d.toISOString().slice(0, 10)
   }

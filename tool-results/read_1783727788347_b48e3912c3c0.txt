@@ -1,0 +1,969 @@
+     1→'use client'
+     2→
+     3→// ============================================================
+     4→// /dashboard/devoluciones — Returns analytics page (Task F5.3-b)
+     5→// ============================================================
+     6→// Client component. Muestra métricas y análisis de devoluciones:
+     7→//   - KPI row (4 cards): total devoluciones, tasa, valor perdido,
+     8→//     producto más devuelto.
+     9→//   - Charts (Recharts horizontal bar): top productos devueltos
+    10→//     (rose) + top ciudades con devoluciones (amber).
+    11→//   - Tabla con filtros: búsqueda debounce 300ms, sort select
+    12→//     (createdAt | lostValue | orderNumber), toggle asc/desc,
+    13→//     paginación. Columna Pedido enlaza a /dashboard/pedidos.
+    14→//
+    15→// Endpoints consumidos (read-only, ya existentes):
+    16→//   GET /api/analytics/returns?metrics=true
+    17→//     → { count, totalOrders, rate, lostValue, topProduct, topCity,
+    18→//        topProducts, topCities }
+    19→//   GET /api/analytics/returns?sortBy=&sortOrder=&limit=&offset=&search=
+    20→//     → { returns: ReturnListItem[], total: number }
+    21→
+    22→import { useEffect, useMemo, useState } from 'react'
+    23→import Link from 'next/link'
+    24→import { useQuery } from '@tanstack/react-query'
+    25→import { toast } from 'sonner'
+    26→import {
+    27→  Undo2,
+    28→  Percent,
+    29→  DollarSign,
+    30→  Package,
+    31→  Search,
+    32→  ArrowUp,
+    33→  ArrowDown,
+    34→  ChevronLeft,
+    35→  ChevronRight,
+    36→  Inbox,
+    37→  Loader2,
+    38→  MapPin,
+    39→  X,
+    40→  PackageX,
+    41→} from 'lucide-react'
+    42→import {
+    43→  Bar,
+    44→  BarChart,
+    45→  Cell,
+    46→  ResponsiveContainer,
+    47→  Tooltip as RechartsTooltip,
+    48→  XAxis,
+    49→  YAxis,
+    50→} from 'recharts'
+    51→
+    52→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+    53→import { Input } from '@/components/ui/input'
+    54→import { Button } from '@/components/ui/button'
+    55→import { Badge } from '@/components/ui/badge'
+    56→import {
+    57→  Table,
+    58→  TableBody,
+    59→  TableCell,
+    60→  TableHead,
+    61→  TableHeader,
+    62→  TableRow,
+    63→} from '@/components/ui/table'
+    64→import {
+    65→  Select,
+    66→  SelectContent,
+    67→  SelectItem,
+    68→  SelectTrigger,
+    69→  SelectValue,
+    70→} from '@/components/ui/select'
+    71→import { Skeleton } from '@/components/ui/skeleton'
+    72→import { Separator } from '@/components/ui/separator'
+    73→import {
+    74→  Tooltip,
+    75→  TooltipContent,
+    76→  TooltipProvider,
+    77→  TooltipTrigger,
+    78→} from '@/components/ui/tooltip'
+    79→import { KPICard } from '@/components/shared/kpi-card'
+    80→import { cn, formatCOP, formatDate, truncate } from '@/lib/format'
+    81→
+    82→// ------------------------------------------------------------
+    83→// Tipos (alineados con la API)
+    84→// ------------------------------------------------------------
+    85→
+    86→interface ReturnsMetrics {
+    87→  count: number
+    88→  totalOrders: number
+    89→  rate: number
+    90→  lostValue: number
+    91→  topProduct: { title: string; count: number } | null
+    92→  topCity: { city: string; count: number } | null
+    93→  topProducts: Array<{ title: string; count: number; lostValue: number }>
+    94→  topCities: Array<{ city: string; count: number; lostValue: number }>
+    95→}
+    96→
+    97→interface ReturnListItem {
+    98→  id: string
+    99→  orderId: string
+   100→  orderNumber: string
+   101→  orderStatus: string
+   102→  productTitle: string | null
+   103→  productId: string | null
+   104→  reason: string | null
+   105→  city: string | null
+   106→  lostValue: number
+   107→  status: string
+   108→  customerName: string
+   109→  customerEmail: string | null
+   110→  createdAt: string
+   111→}
+   112→
+   113→interface ReturnsListResponse {
+   114→  returns: ReturnListItem[]
+   115→  total: number
+   116→}
+   117→
+   118→// ------------------------------------------------------------
+   119→// Constantes de presentación
+   120→// ------------------------------------------------------------
+   121→
+   122→const PAGE_SIZE = 10
+   123→
+   124→type SortBy = 'createdAt' | 'lostValue' | 'orderNumber'
+   125→type SortOrder = 'asc' | 'desc'
+   126→
+   127→const SORT_BY_OPTIONS: { value: SortBy; label: string }[] = [
+   128→  { value: 'createdAt', label: 'Fecha' },
+   129→  { value: 'lostValue', label: 'Valor perdido' },
+   130→  { value: 'orderNumber', label: 'N.º de pedido' },
+   131→]
+   132→
+   133→// Estado de la devolución (Return.status) → etiqueta + clases.
+   134→const RETURN_STATUS_META: Record<
+   135→  string,
+   136→  { label: string; className: string }
+   137→> = {
+   138→  RECEIVED: {
+   139→    label: 'Recibida',
+   140→    className:
+   141→      'border-zinc-300 bg-zinc-100 text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-300',
+   142→  },
+   143→  INSPECTED: {
+   144→    label: 'Inspeccionada',
+   145→    className:
+   146→      'border-amber-300 bg-amber-100 text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
+   147→  },
+   148→  RESTOCKED: {
+   149→    label: 'Reabastecida',
+   150→    className:
+   151→      'border-emerald-300 bg-emerald-100 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300',
+   152→  },
+   153→  DISCARDED: {
+   154→    label: 'Descartada',
+   155→    className:
+   156→      'border-rose-300 bg-rose-100 text-rose-800 dark:border-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
+   157→  },
+   158→}
+   159→
+   160→const DEFAULT_STATUS_META = {
+   161→  label: 'Desconocido',
+   162→  className:
+   163→    'border-border bg-muted text-muted-foreground',
+   164→}
+   165→
+   166→// Colores Recharts (hex para inline SVG; visibles en light/dark).
+   167→const ROSE_BAR = '#f43f5e' // rose-500
+   168→const AMBER_BAR = '#f59e0b' // amber-500
+   169→
+   170→// ------------------------------------------------------------
+   171→// Subcomponentes
+   172→// ------------------------------------------------------------
+   173→
+   174→function ReturnStatusBadge({ status }: { status: string }) {
+   175→  const meta = RETURN_STATUS_META[status] ?? DEFAULT_STATUS_META
+   176→  return (
+   177→    <Badge variant="outline" className={cn('border', meta.className)}>
+   178→      {meta.label}
+   179→    </Badge>
+   180→  )
+   181→}
+   182→
+   183→interface ReasonCellProps {
+   184→  reason: string | null
+   185→}
+   186→
+   187→function ReasonCell({ reason }: ReasonCellProps) {
+   188→  const MAX = 32
+   189→  if (!reason) {
+   190→    return <span className="text-muted-foreground">—</span>
+   191→  }
+   192→  const truncated = truncate(reason, MAX)
+   193→  const isTruncated = truncated !== reason
+   194→  if (!isTruncated) {
+   195→    return <span className="text-sm text-foreground">{reason}</span>
+   196→  }
+   197→  return (
+   198→    <TooltipProvider delayDuration={150}>
+   199→      <Tooltip>
+   200→        <TooltipTrigger asChild>
+   201→          <span
+   202→            className="cursor-help text-sm text-foreground decoration-dotted underline-offset-2 hover:underline"
+   203→            tabIndex={0}
+   204→          >
+   205→            {truncated}
+   206→          </span>
+   207→        </TooltipTrigger>
+   208→        <TooltipContent className="max-w-xs whitespace-normal text-left">
+   209→          {reason}
+   210→        </TooltipContent>
+   211→      </Tooltip>
+   212→    </TooltipProvider>
+   213→  )
+   214→}
+   215→
+   216→// ---- Charts ----
+   217→
+   218→interface TopProductsChartProps {
+   219→  data: Array<{ title: string; count: number; lostValue: number }>
+   220→}
+   221→
+   222→function TopProductsChart({ data }: TopProductsChartProps) {
+   223→  const formatted = useMemo(
+   224→    () =>
+   225→      data.map((d) => ({
+   226→        ...d,
+   227→        shortTitle: truncate(d.title, 22),
+   228→      })),
+   229→    [data],
+   230→  )
+   231→
+   232→  return (
+   233→    <ResponsiveContainer width="100%" height={320}>
+   234→      <BarChart
+   235→        data={formatted}
+   236→        layout="vertical"
+   237→        margin={{ top: 0, right: 24, bottom: 0, left: 8 }}
+   238→        barCategoryGap={8}
+   239→      >
+   240→        <XAxis
+   241→          type="number"
+   242→          tickLine={false}
+   243→          axisLine={false}
+   244→          tick={{ fontSize: 11, fill: 'var(--muted-foreground)' }}
+   245→          allowDecimals={false}
+   246→        />
+   247→        <YAxis
+   248→          type="category"
+   249→          dataKey="shortTitle"
+   250→          tickLine={false}
+   251→          axisLine={false}
+   252→          tick={{ fontSize: 11, fill: 'var(--muted-foreground)' }}
+   253→          width={150}
+   254→        />
+   255→        <RechartsTooltip
+   256→          content={<TopProductsTooltip />}
+   257→          cursor={{ fill: 'var(--muted)', opacity: 0.4 }}
+   258→        />
+   259→        <Bar dataKey="count" radius={[0, 4, 4, 0]} maxBarSize={22}>
+   260→          {formatted.map((entry, idx) => (
+   261→            <Cell key={`${entry.title}-${idx}`} fill={ROSE_BAR} />
+   262→          ))}
+   263→        </Bar>
+   264→      </BarChart>
+   265→    </ResponsiveContainer>
+   266→  )
+   267→}
+   268→
+   269→interface TopProductsTooltipProps {
+   270→  active?: boolean
+   271→  payload?: Array<{
+   272→    payload?: { title: string; count: number; lostValue: number }
+   273→  }>
+   274→}
+   275→
+   276→function TopProductsTooltip({ active, payload }: TopProductsTooltipProps) {
+   277→  if (!active || !payload || payload.length === 0) return null
+   278→  const p = payload[0]?.payload
+   279→  if (!p) return null
+   280→  return (
+   281→    <div className="rounded-md border border-border bg-popover p-3 text-xs shadow-md">
+   282→      <p className="mb-1.5 max-w-[220px] font-medium text-popover-foreground">
+   283→        {p.title}
+   284→      </p>
+   285→      <p className="text-muted-foreground">
+   286→        Devoluciones:{' '}
+   287→        <span className="font-semibold text-foreground">{p.count}</span>
+   288→      </p>
+   289→      <p className="text-muted-foreground">
+   290→        Valor perdido:{' '}
+   291→        <span className="font-semibold text-rose-600 dark:text-rose-400">
+   292→          {formatCOP(p.lostValue)}
+   293→        </span>
+   294→      </p>
+   295→    </div>
+   296→  )
+   297→}
+   298→
+   299→interface TopCitiesChartProps {
+   300→  data: Array<{ city: string; count: number; lostValue: number }>
+   301→}
+   302→
+   303→function TopCitiesChart({ data }: TopCitiesChartProps) {
+   304→  return (
+   305→    <ResponsiveContainer width="100%" height={320}>
+   306→      <BarChart
+   307→        data={data}
+   308→        layout="vertical"
+   309→        margin={{ top: 0, right: 24, bottom: 0, left: 8 }}
+   310→        barCategoryGap={8}
+   311→      >
+   312→        <XAxis
+   313→          type="number"
+   314→          tickLine={false}
+   315→          axisLine={false}
+   316→          tick={{ fontSize: 11, fill: 'var(--muted-foreground)' }}
+   317→          allowDecimals={false}
+   318→        />
+   319→        <YAxis
+   320→          type="category"
+   321→          dataKey="city"
+   322→          tickLine={false}
+   323→          axisLine={false}
+   324→          tick={{ fontSize: 11, fill: 'var(--muted-foreground)' }}
+   325→          width={120}
+   326→        />
+   327→        <RechartsTooltip
+   328→          content={<TopCitiesTooltip />}
+   329→          cursor={{ fill: 'var(--muted)', opacity: 0.4 }}
+   330→        />
+   331→        <Bar dataKey="count" radius={[0, 4, 4, 0]} maxBarSize={22}>
+   332→          {data.map((entry, idx) => (
+   333→            <Cell key={`${entry.city}-${idx}`} fill={AMBER_BAR} />
+   334→          ))}
+   335→        </Bar>
+   336→      </BarChart>
+   337→    </ResponsiveContainer>
+   338→  )
+   339→}
+   340→
+   341→interface TopCitiesTooltipProps {
+   342→  active?: boolean
+   343→  payload?: Array<{
+   344→    payload?: { city: string; count: number; lostValue: number }
+   345→  }>
+   346→}
+   347→
+   348→function TopCitiesTooltip({ active, payload }: TopCitiesTooltipProps) {
+   349→  if (!active || !payload || payload.length === 0) return null
+   350→  const p = payload[0]?.payload
+   351→  if (!p) return null
+   352→  return (
+   353→    <div className="rounded-md border border-border bg-popover p-3 text-xs shadow-md">
+   354→      <p className="mb-1.5 font-medium text-popover-foreground">{p.city}</p>
+   355→      <p className="text-muted-foreground">
+   356→        Devoluciones:{' '}
+   357→        <span className="font-semibold text-foreground">{p.count}</span>
+   358→      </p>
+   359→      <p className="text-muted-foreground">
+   360→        Valor perdido:{' '}
+   361→        <span className="font-semibold text-amber-600 dark:text-amber-400">
+   362→          {formatCOP(p.lostValue)}
+   363→        </span>
+   364→      </p>
+   365→    </div>
+   366→  )
+   367→}
+   368→
+   369→// ---- Empty chart placeholder ----
+   370→
+   371→function EmptyChart({ message }: { message: string }) {
+   372→  return (
+   373→    <div
+   374→      className="flex h-[320px] flex-col items-center justify-center gap-3 text-center"
+   375→      role="status"
+   376→    >
+   377→      <div className="flex size-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
+   378→        <PackageX className="size-6" aria-hidden />
+   379→      </div>
+   380→      <div className="space-y-1">
+   381→        <p className="text-sm font-medium text-foreground">{message}</p>
+   382→        <p className="text-xs text-muted-foreground">
+   383→          Aparecerán aquí cuando se registren devoluciones.
+   384→        </p>
+   385→      </div>
+   386→    </div>
+   387→  )
+   388→}
+   389→
+   390→// ---- Skeletons ----
+   391→
+   392→function KpiSkeleton() {
+   393→  return (
+   394→    <Card className="gap-0 p-4 md:p-5">
+   395→      <CardContent className="p-0">
+   396→        <div className="flex items-start justify-between gap-3">
+   397→          <div className="flex-1 space-y-2">
+   398→            <Skeleton className="h-3 w-20" />
+   399→            <Skeleton className="h-8 w-24" />
+   400→            <Skeleton className="h-3 w-16" />
+   401→          </div>
+   402→          <Skeleton className="size-10 rounded-lg" />
+   403→        </div>
+   404→      </CardContent>
+   405→    </Card>
+   406→  )
+   407→}
+   408→
+   409→function ChartSkeleton() {
+   410→  return (
+   411→    <Card>
+   412→      <CardHeader>
+   413→        <Skeleton className="h-4 w-40" />
+   414→      </CardHeader>
+   415→      <CardContent className="space-y-2">
+   416→        {Array.from({ length: 5 }).map((_, i) => (
+   417→          <Skeleton key={i} className="h-6 w-full" style={{ width: `${60 + i * 8}%` }} />
+   418→        ))}
+   419→      </CardContent>
+   420→    </Card>
+   421→  )
+   422→}
+   423→
+   424→function RowSkeleton() {
+   425→  return (
+   426→    <TableRow>
+   427→      <TableCell>
+   428→        <Skeleton className="h-4 w-16" />
+   429→      </TableCell>
+   430→      <TableCell>
+   431→        <div className="space-y-1.5">
+   432→          <Skeleton className="h-4 w-32" />
+   433→          <Skeleton className="h-3 w-40" />
+   434→        </div>
+   435→      </TableCell>
+   436→      <TableCell className="hidden md:table-cell">
+   437→        <Skeleton className="h-4 w-28" />
+   438→      </TableCell>
+   439→      <TableCell className="hidden lg:table-cell">
+   440→        <Skeleton className="h-4 w-20" />
+   441→      </TableCell>
+   442→      <TableCell className="hidden md:table-cell">
+   443→        <Skeleton className="h-4 w-24" />
+   444→      </TableCell>
+   445→      <TableCell className="text-right">
+   446→        <Skeleton className="ml-auto h-4 w-20" />
+   447→      </TableCell>
+   448→      <TableCell>
+   449→        <Skeleton className="h-5 w-20 rounded-full" />
+   450→      </TableCell>
+   451→      <TableCell className="hidden sm:table-cell">
+   452→        <Skeleton className="h-4 w-24" />
+   453→      </TableCell>
+   454→    </TableRow>
+   455→  )
+   456→}
+   457→
+   458→// ------------------------------------------------------------
+   459→// Página principal
+   460→// ------------------------------------------------------------
+   461→
+   462→export default function DevolucionesPage() {
+   463→  // Estados de filtros
+   464→  const [search, setSearch] = useState('')
+   465→  const [debouncedSearch, setDebouncedSearch] = useState('')
+   466→  const [sortBy, setSortBy] = useState<SortBy>('createdAt')
+   467→  const [sortOrder, setSortOrder] = useState<SortOrder>('desc')
+   468→  const [page, setPage] = useState(0)
+   469→
+   470→  // Debounce 300ms del input de búsqueda.
+   471→  useEffect(() => {
+   472→    const t = setTimeout(() => {
+   473→      setDebouncedSearch(search.trim())
+   474→      setPage(0)
+   475→    }, 300)
+   476→    return () => clearTimeout(t)
+   477→  }, [search])
+   478→
+   479→  // ---------------- Queries ----------------
+   480→
+   481→  const metricsQuery = useQuery<ReturnsMetrics>({
+   482→    queryKey: ['returns-metrics'],
+   483→    queryFn: async () => {
+   484→      const res = await fetch('/api/analytics/returns?metrics=true')
+   485→      if (!res.ok) {
+   486→        const err = (await res.json().catch(() => ({}))) as { error?: string }
+   487→        throw new Error(err?.error ?? `Error ${res.status}`)
+   488→      }
+   489→      return res.json() as Promise<ReturnsMetrics>
+   490→    },
+   491→    staleTime: 30_000,
+   492→  })
+   493→
+   494→  const listQuery = useQuery<ReturnsListResponse>({
+   495→    queryKey: ['returns-list', debouncedSearch, sortBy, sortOrder, page],
+   496→    queryFn: async () => {
+   497→      const params = new URLSearchParams()
+   498→      if (debouncedSearch) params.set('search', debouncedSearch)
+   499→      params.set('sortBy', sortBy)
+   500→      params.set('sortOrder', sortOrder)
+   501→      params.set('limit', String(PAGE_SIZE))
+   502→      params.set('offset', String(page * PAGE_SIZE))
+   503→      const res = await fetch(
+   504→        `/api/analytics/returns?${params.toString()}`,
+   505→      )
+   506→      if (!res.ok) {
+   507→        const err = (await res.json().catch(() => ({}))) as { error?: string }
+   508→        throw new Error(err?.error ?? `Error ${res.status}`)
+   509→      }
+   510→      return res.json() as Promise<ReturnsListResponse>
+   511→    },
+   512→    placeholderData: (prev) => prev,
+   513→  })
+   514→
+   515→  // Toasts de error (no encadenar en render: useEffect).
+   516→  useEffect(() => {
+   517→    if (metricsQuery.error) {
+   518→      toast.error('Error al cargar métricas de devoluciones', {
+   519→        description:
+   520→          metricsQuery.error instanceof Error
+   521→            ? metricsQuery.error.message
+   522→            : undefined,
+   523→      })
+   524→    }
+   525→  }, [metricsQuery.error])
+   526→
+   527→  useEffect(() => {
+   528→    if (listQuery.error) {
+   529→      toast.error('Error al cargar la lista de devoluciones', {
+   530→        description:
+   531→          listQuery.error instanceof Error
+   532→            ? listQuery.error.message
+   533→            : undefined,
+   534→      })
+   535→    }
+   536→  }, [listQuery.error])
+   537→
+   538→  // ---------------- Handlers ----------------
+   539→
+   540→  function toggleSortOrder() {
+   541→    setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'))
+   542→    setPage(0)
+   543→  }
+   544→
+   545→  function clearFilters() {
+   546→    setSearch('')
+   547→    setDebouncedSearch('')
+   548→    setSortBy('createdAt')
+   549→    setSortOrder('desc')
+   550→    setPage(0)
+   551→  }
+   552→
+   553→  // ---------------- Derived ----------------
+   554→
+   555→  const metrics = metricsQuery.data
+   556→  const returns = listQuery.data?.returns ?? []
+   557→  const total = listQuery.data?.total ?? 0
+   558→  const from = total === 0 ? 0 : page * PAGE_SIZE + 1
+   559→  const to = Math.min((page + 1) * PAGE_SIZE, total)
+   560→  const hasNext = to < total
+   561→  const hasPrev = page > 0
+   562→
+   563→  const hasActiveFilters =
+   564→    search.trim() !== '' ||
+   565→    sortBy !== 'createdAt' ||
+   566→    sortOrder !== 'desc'
+   567→
+   568→  const listIsLoading = listQuery.isLoading && !listQuery.data
+   569→  const listIsFetching = listQuery.isFetching && !!listQuery.data
+   570→
+   571→  // Memo de KPIs.
+   572→  const kpis = useMemo(() => {
+   573→    if (!metrics) return null
+   574→    return [
+   575→      {
+   576→        title: 'Total devoluciones',
+   577→        value: String(metrics.count),
+   578→        icon: <Undo2 className="size-5" />,
+   579→        subtitle: metrics.topCity
+   580→          ? `Top: ${metrics.topCity.city}`
+   581→          : 'En la plataforma',
+   582→        className: '',
+   583→      },
+   584→      {
+   585→        title: 'Tasa de devolución',
+   586→        value: `${metrics.rate}%`,
+   587→        icon: <Percent className="size-5" />,
+   588→        subtitle: `de ${metrics.totalOrders} pedidos`,
+   589→        className: '',
+   590→      },
+   591→      {
+   592→        title: 'Valor perdido',
+   593→        value: formatCOP(metrics.lostValue),
+   594→        icon: (
+   595→          <DollarSign className="size-5 text-rose-600 dark:text-rose-400" />
+   596→        ),
+   597→        subtitle: 'Acumulado en devoluciones',
+   598→        className:
+   599→          'border-rose-200 dark:border-rose-900/50',
+   600→      },
+   601→      {
+   602→        title: 'Producto más devuelto',
+   603→        value: metrics.topProduct?.title ?? 'N/A',
+   604→        icon: <Package className="size-5" />,
+   605→        subtitle: metrics.topProduct
+   606→          ? `${metrics.topProduct.count} devoluciones`
+   607→          : 'Sin datos',
+   608→        className: '',
+   609→      },
+   610→    ]
+   611→  }, [metrics])
+   612→
+   613→  // ---------------- Render ----------------
+   614→
+   615→  return (
+   616→    <div className="mx-auto w-full max-w-7xl space-y-6 p-4 md:p-6">
+   617→      {/* Header */}
+   618→      <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+   619→        <div className="space-y-1">
+   620→          <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
+   621→            <Undo2 className="size-6 text-muted-foreground" aria-hidden />
+   622→            Control de Devoluciones
+   623→          </h1>
+   624→          <p className="text-sm text-muted-foreground">
+   625→            Métricas y análisis de productos devueltos.
+   626→          </p>
+   627→        </div>
+   628→      </header>
+   629→
+   630→      {/* KPI row */}
+   631→      <section
+   632→        aria-label="Métricas de devoluciones"
+   633→        className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4"
+   634→      >
+   635→        {metricsQuery.isLoading && !metrics
+   636→          ? Array.from({ length: 4 }).map((_, i) => <KpiSkeleton key={i} />)
+   637→          : kpis
+   638→            ? kpis.map((kpi) => (
+   639→                <KPICard
+   640→                  key={kpi.title}
+   641→                  title={kpi.title}
+   642→                  value={kpi.value}
+   643→                  icon={kpi.icon}
+   644→                  subtitle={kpi.subtitle}
+   645→                  loading={false}
+   646→                  className={kpi.className}
+   647→                />
+   648→              ))
+   649→            : null}
+   650→      </section>
+   651→
+   652→      {/* Charts */}
+   653→      <section
+   654→        aria-label="Gráficos de devoluciones"
+   655→        className="grid grid-cols-1 gap-4 lg:grid-cols-2"
+   656→      >
+   657→        {/* Top productos devueltos */}
+   658→        <Card>
+   659→          <CardHeader>
+   660→            <CardTitle className="flex items-center gap-2 text-base">
+   661→              <Package
+   662→                className="size-4 text-rose-500"
+   663→                aria-hidden
+   664→              />
+   665→              Top productos devueltos
+   666→            </CardTitle>
+   667→          </CardHeader>
+   668→          <CardContent>
+   669→            {metricsQuery.isLoading && !metrics ? (
+   670→              <ChartSkeleton />
+   671→            ) : metrics && metrics.topProducts.length > 0 ? (
+   672→              <TopProductsChart data={metrics.topProducts} />
+   673→            ) : (
+   674→              <EmptyChart message="Sin datos de devoluciones" />
+   675→            )}
+   676→          </CardContent>
+   677→        </Card>
+   678→
+   679→        {/* Top ciudades con devoluciones */}
+   680→        <Card>
+   681→          <CardHeader>
+   682→            <CardTitle className="flex items-center gap-2 text-base">
+   683→              <MapPin className="size-4 text-amber-500" aria-hidden />
+   684→              Top ciudades con devoluciones
+   685→            </CardTitle>
+   686→          </CardHeader>
+   687→          <CardContent>
+   688→            {metricsQuery.isLoading && !metrics ? (
+   689→              <ChartSkeleton />
+   690→            ) : metrics && metrics.topCities.length > 0 ? (
+   691→              <TopCitiesChart data={metrics.topCities} />
+   692→            ) : (
+   693→              <EmptyChart message="Sin datos de devoluciones" />
+   694→            )}
+   695→          </CardContent>
+   696→        </Card>
+   697→      </section>
+   698→
+   699→      {/* Returns table */}
+   700→      <section
+   701→        aria-label="Lista de devoluciones"
+   702→        className="rounded-xl border bg-card shadow-sm"
+   703→      >
+   704→        {/* Filters bar */}
+   705→        <div className="border-b p-4">
+   706→          <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
+   707→            {/* Search */}
+   708→            <div className="flex-1 space-y-1.5">
+   709→              <label
+   710→                htmlFor="returns-search"
+   711→                className="text-xs font-medium text-muted-foreground"
+   712→              >
+   713→                Buscar
+   714→              </label>
+   715→              <div className="relative">
+   716→                <Search
+   717→                  className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+   718→                  aria-hidden
+   719→                />
+   720→                <Input
+   721→                  id="returns-search"
+   722→                  value={search}
+   723→                  onChange={(e) => setSearch(e.target.value)}
+   724→                  placeholder="Pedido, cliente, producto, motivo o ciudad…"
+   725→                  className="pl-9"
+   726→                  autoComplete="off"
+   727→                />
+   728→                {search && (
+   729→                  <button
+   730→                    type="button"
+   731→                    onClick={() => setSearch('')}
+   732→                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded-sm p-0.5 text-muted-foreground hover:text-foreground"
+   733→                    aria-label="Limpiar búsqueda"
+   734→                  >
+   735→                    <X className="size-4" />
+   736→                  </button>
+   737→                )}
+   738→              </div>
+   739→            </div>
+   740→
+   741→            {/* Sort by */}
+   742→            <div className="w-full space-y-1.5 sm:w-52">
+   743→              <label
+   744→                htmlFor="returns-sort-by"
+   745→                className="block text-xs font-medium text-muted-foreground"
+   746→              >
+   747→                Ordenar por
+   748→              </label>
+   749→              <Select
+   750→                value={sortBy}
+   751→                onValueChange={(v) => {
+   752→                  setSortBy(v as SortBy)
+   753→                  setPage(0)
+   754→                }}
+   755→              >
+   756→                <SelectTrigger id="returns-sort-by" className="w-full">
+   757→                  <SelectValue placeholder="Fecha" />
+   758→                </SelectTrigger>
+   759→                <SelectContent>
+   760→                  {SORT_BY_OPTIONS.map((opt) => (
+   761→                    <SelectItem key={opt.value} value={opt.value}>
+   762→                      {opt.label}
+   763→                    </SelectItem>
+   764→                  ))}
+   765→                </SelectContent>
+   766→              </Select>
+   767→            </div>
+   768→
+   769→            {/* Sort order toggle + clear */}
+   770→            <div className="flex items-end gap-2">
+   771→              <Button
+   772→                type="button"
+   773→                variant="outline"
+   774→                size="icon"
+   775→                onClick={toggleSortOrder}
+   776→                aria-label={
+   777→                  sortOrder === 'asc'
+   778→                    ? 'Cambiar a descendente'
+   779→                    : 'Cambiar a ascendente'
+   780→                }
+   781→                title={sortOrder === 'asc' ? 'Ascendente' : 'Descendente'}
+   782→                className="size-9"
+   783→              >
+   784→                {sortOrder === 'asc' ? (
+   785→                  <ArrowUp className="size-4" />
+   786→                ) : (
+   787→                  <ArrowDown className="size-4" />
+   788→                )}
+   789→              </Button>
+   790→              {hasActiveFilters && (
+   791→                <Button
+   792→                  type="button"
+   793→                  variant="ghost"
+   794→                  size="sm"
+   795→                  onClick={clearFilters}
+   796→                  className="gap-1.5 text-muted-foreground"
+   797→                >
+   798→                  <X className="size-4" />
+   799→                  Limpiar
+   800→                </Button>
+   801→              )}
+   802→            </div>
+   803→          </div>
+   804→        </div>
+   805→
+   806→        {/* Table */}
+   807→        <div className="relative overflow-x-auto">
+   808→          <Table>
+   809→            <TableHeader>
+   810→              <TableRow className="bg-muted/40 hover:bg-muted/40">
+   811→                <TableHead className="w-[90px]">Pedido</TableHead>
+   812→                <TableHead className="min-w-[180px]">Cliente</TableHead>
+   813→                <TableHead className="hidden min-w-[160px] md:table-cell">
+   814→                  Producto
+   815→                </TableHead>
+   816→                <TableHead className="hidden lg:table-cell">Ciudad</TableHead>
+   817→                <TableHead className="hidden min-w-[160px] md:table-cell">
+   818→                  Motivo
+   819→                </TableHead>
+   820→                <TableHead className="text-right">Valor perdido</TableHead>
+   821→                <TableHead>Estado</TableHead>
+   822→                <TableHead className="hidden sm:table-cell">Fecha</TableHead>
+   823→              </TableRow>
+   824→            </TableHeader>
+   825→            <TableBody>
+   826→              {listIsLoading ? (
+   827→                Array.from({ length: 6 }).map((_, i) => (
+   828→                  <RowSkeleton key={i} />
+   829→                ))
+   830→              ) : returns.length === 0 ? (
+   831→                <TableRow>
+   832→                  <TableCell colSpan={8} className="h-48">
+   833→                    <div className="flex flex-col items-center justify-center gap-3 text-center">
+   834→                      <div className="flex size-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
+   835→                        <Inbox className="size-6" aria-hidden />
+   836→                      </div>
+   837→                      <div className="space-y-1">
+   838→                        <p className="text-sm font-medium text-foreground">
+   839→                          Sin devoluciones registradas
+   840→                        </p>
+   841→                        <p className="text-xs text-muted-foreground">
+   842→                          {hasActiveFilters
+   843→                            ? 'Prueba con otros filtros o limpia la búsqueda.'
+   844→                            : 'Las devoluciones aparecerán aquí cuando se registren.'}
+   845→                        </p>
+   846→                      </div>
+   847→                    </div>
+   848→                  </TableCell>
+   849→                </TableRow>
+   850→              ) : (
+   851→                returns.map((r) => (
+   852→                  <TableRow
+   853→                    key={r.id}
+   854→                    className="transition-colors hover:bg-muted/40"
+   855→                  >
+   856→                    <TableCell>
+   857→                      <Link
+   858→                        href="/dashboard/pedidos"
+   859→                        className="inline-flex items-center font-medium text-foreground underline-offset-2 hover:text-rose-600 hover:underline dark:hover:text-rose-400"
+   860→                        title={`Ver pedido ${r.orderNumber}`}
+   861→                      >
+   862→                        {r.orderNumber}
+   863→                      </Link>
+   864→                    </TableCell>
+   865→                    <TableCell>
+   866→                      <div className="flex flex-col">
+   867→                        <span className="font-medium text-foreground">
+   868→                          {r.customerName}
+   869→                        </span>
+   870→                        {r.customerEmail && (
+   871→                          <span
+   872→                            className="truncate text-xs text-muted-foreground"
+   873→                            title={r.customerEmail}
+   874→                          >
+   875→                            {r.customerEmail}
+   876→                          </span>
+   877→                        )}
+   878→                      </div>
+   879→                    </TableCell>
+   880→                    <TableCell className="hidden md:table-cell">
+   881→                      {r.productTitle ? (
+   882→                        <span
+   883→                          className="block max-w-[220px] truncate text-sm text-foreground"
+   884→                          title={r.productTitle}
+   885→                        >
+   886→                          {r.productTitle}
+   887→                        </span>
+   888→                      ) : (
+   889→                        <span className="text-muted-foreground">—</span>
+   890→                      )}
+   891→                    </TableCell>
+   892→                    <TableCell className="hidden lg:table-cell">
+   893→                      {r.city ? (
+   894→                        <span className="text-sm text-foreground">{r.city}</span>
+   895→                      ) : (
+   896→                        <span className="text-muted-foreground">—</span>
+   897→                      )}
+   898→                    </TableCell>
+   899→                    <TableCell className="hidden md:table-cell">
+   900→                      <ReasonCell reason={r.reason} />
+   901→                    </TableCell>
+   902→                    <TableCell className="text-right">
+   903→                      <span className="tabular-nums font-medium text-rose-600 dark:text-rose-400">
+   904→                        {formatCOP(r.lostValue)}
+   905→                      </span>
+   906→                    </TableCell>
+   907→                    <TableCell>
+   908→                      <ReturnStatusBadge status={r.status} />
+   909→                    </TableCell>
+   910→                    <TableCell className="hidden sm:table-cell">
+   911→                      <span
+   912→                        className="text-sm tabular-nums text-muted-foreground"
+   913→                        title={r.createdAt}
+   914→                      >
+   915→                        {formatDate(r.createdAt)}
+   916→                      </span>
+   917→                    </TableCell>
+   918→                  </TableRow>
+   919→                ))
+   920→              )}
+   921→            </TableBody>
+   922→          </Table>
+   923→          {listIsFetching && !listIsLoading ? (
+   924→            <div className="pointer-events-none absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-background/80 px-2 py-1 text-xs text-muted-foreground shadow-sm backdrop-blur">
+   925→              <Loader2 className="size-3 animate-spin" />
+   926→              Actualizando…
+   927→            </div>
+   928→          ) : null}
+   929→        </div>
+   930→
+   931→        {/* Pagination */}
+   932→        <Separator />
+   933→        <div className="flex flex-col items-center justify-between gap-3 p-3 sm:flex-row">
+   934→          <p className="text-xs text-muted-foreground" aria-live="polite">
+   935→            {total === 0
+   936→              ? 'Sin resultados'
+   937→              : `Mostrando ${from}–${to} de ${total} devolución${total === 1 ? '' : 'es'}`}
+   938→          </p>
+   939→          <div className="flex items-center gap-2">
+   940→            <Button
+   941→              variant="outline"
+   942→              size="sm"
+   943→              onClick={() => setPage((p) => Math.max(0, p - 1))}
+   944→              disabled={!hasPrev || listIsFetching}
+   945→              className="gap-1"
+   946→            >
+   947→              <ChevronLeft className="size-4" />
+   948→              Anterior
+   949→            </Button>
+   950→            <span className="text-xs text-muted-foreground">
+   951→              Pág. {page + 1}
+   952→            </span>
+   953→            <Button
+   954→              variant="outline"
+   955→              size="sm"
+   956→              onClick={() => setPage((p) => p + 1)}
+   957→              disabled={!hasNext || listIsFetching}
+   958→              className="gap-1"
+   959→            >
+   960→              Siguiente
+   961→              <ChevronRight className="size-4" />
+   962→            </Button>
+   963→          </div>
+   964→        </div>
+   965→      </section>
+   966→    </div>
+   967→  )
+   968→}
+   969→

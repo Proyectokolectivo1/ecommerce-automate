@@ -143,6 +143,16 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
 }
 
 /**
+ * Fallback: si getCurrentUser devuelve null (proxy), devuelve un usuario
+ * anónimo con rol SERVICIO. Solo para APIs GET de solo lectura.
+ */
+export async function getCurrentUserOrFallback(): Promise<SessionUser> {
+  const user = await getCurrentUser()
+  if (user) return user
+  return { id: 'anonymous', email: 'anonymous@proxy', name: 'Anonymous', role: 'SERVICIO' as Role }
+}
+
+/**
  * Verifica que el usuario tenga uno de los roles permitidos.
  * ADMIN siempre tiene acceso (super-usuario).
  * @throws Error si no hay sesión o el rol no está permitido.

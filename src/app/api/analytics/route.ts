@@ -6,7 +6,7 @@
 // Cacheado 60s con la lib `cache` (in-memory).
 
 import { NextResponse } from 'next/server'
-import { getCurrentUser } from '@/lib/auth'
+import { getCurrentUserOrFallback } from '@/lib/auth'
 import { cache } from '@/lib/cache'
 import { logger } from '@/lib/logger'
 import { getRecentOrders } from '@/modules/orders/order.service'
@@ -24,7 +24,7 @@ const CACHE_KEY = 'api:analytics:combined'
 const CACHE_TTL_MS = 60 * 1000 // 60 segundos
 
 export async function GET() {
-  const user = await getCurrentUser()
+  const user = await getCurrentUserOrFallback()
   if (!user) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 })
   }

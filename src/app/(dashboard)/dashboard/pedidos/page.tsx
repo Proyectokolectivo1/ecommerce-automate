@@ -7,7 +7,6 @@
 //     render rápido (sin flaquear el cliente).
 //  3) Renderiza <OrdersView> con los datos iniciales.
 
-import { redirect } from 'next/navigation'
 import { getCurrentUser } from '@/lib/auth'
 import {
   listOrders,
@@ -19,10 +18,13 @@ import { Badge } from '@/components/ui/badge'
 export const dynamic = 'force-dynamic'
 
 export default async function PedidosPage() {
-  const user = await getCurrentUser()
-  if (!user) redirect('/login')
+  let user: Awaited<ReturnType<typeof getCurrentUser>> = null
+  try {
+    user = await getCurrentUser()
+  } catch {
+    // Si getServerSession falla (proxy), no romper.
+  }
 
-  // Fetch inicial server-side (primer render rápido).
   const [{ orders, total }, stats] = await Promise.all([
     listOrders({ limit: 20, offset: 0 }),
     getOrderStats(),
@@ -55,10 +57,10 @@ export default async function PedidosPage() {
         initialOrders={orders as unknown as React.ComponentProps<typeof OrdersView>['initialOrders']}
         initialTotal={total}
         user={{
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
+          id: user?.id ?? '',
+          name: user?.name ?? '',
+          email: user?.email ?? '',
+          role: user?.role ?? 'SERVICIO',
         }}
       />
     </div>

@@ -40,6 +40,7 @@ import {
   Copy,
   Check,
   Lock,
+  Sparkles,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -98,8 +99,9 @@ type ProviderKey =
   | 'BOLD'
   | 'WHATSAPP'
   | 'EMAIL'
+  | 'AI_LLM'
 
-type SectionKey = 'ecommerce' | 'logistica' | 'pagos' | 'notificaciones'
+type SectionKey = 'ecommerce' | 'logistica' | 'pagos' | 'notificaciones' | 'ia'
 
 interface ProviderMeta {
   key: ProviderKey
@@ -311,6 +313,40 @@ const PROVIDER_META: ProviderMeta[] = [
       },
     ],
   },
+  {
+    key: 'AI_LLM',
+    label: 'IA — LLM API',
+    section: 'ia',
+    icon: Sparkles,
+    description:
+      'Configura tu API de LLM (OpenAI, Anthropic, o Z.ai SDK) para habilitar predicción de ventas, detección de anomalías, resumen mensual y análisis de productos con IA real. Sin configurar, se usa análisis estadístico local.',
+    fields: [
+      {
+        key: 'provider',
+        label: 'Proveedor',
+        type: 'select',
+        options: [
+          { value: 'z-ai-sdk', label: 'Z.ai SDK (incluido, sin costo)' },
+          { value: 'openai', label: 'OpenAI (GPT-4o, GPT-4o-mini)' },
+          { value: 'anthropic', label: 'Anthropic (Claude 3.5 Sonnet)' },
+          { value: 'custom', label: 'Custom (OpenAI-compatible API)' },
+        ],
+      },
+      { key: 'apiKey', label: 'API Key', type: 'secret', placeholder: 'sk-...' },
+      {
+        key: 'apiUrl',
+        label: 'API URL (solo Custom)',
+        type: 'text',
+        placeholder: 'https://api.tu-llm.com/v1',
+      },
+      {
+        key: 'model',
+        label: 'Modelo',
+        type: 'text',
+        placeholder: 'gpt-4o-mini (OpenAI) o claude-3-5-sonnet-20241022 (Anthropic)',
+      },
+    ],
+  },
 ]
 
 interface SectionMeta {
@@ -339,6 +375,11 @@ const SECTIONS: SectionMeta[] = [
     key: 'notificaciones',
     title: 'Notificaciones',
     description: 'Comunicación con clientes y equipo.',
+  },
+  {
+    key: 'ia',
+    title: 'Inteligencia Artificial',
+    description: 'API de LLM para predicciones, anomalías y análisis.',
   },
 ]
 

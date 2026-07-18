@@ -1,38 +1,15 @@
 // ============================================================
-// (dashboard)/layout.tsx — Authenticated layout (server)
+// (dashboard)/layout.tsx — Dashboard layout (client-only AppShell)
 // ============================================================
-// Server component. Lee la sesión con getCurrentUser(); si no hay,
-// redirige a /login. Renderiza el AppShell con la info del usuario.
 
-import { redirect } from 'next/navigation'
-import { getCurrentUser } from '@/lib/auth'
-import { AppShell } from '@/components/layout/app-shell'
-
-// Arranca el worker de impresión periódico (server-side only).
-// El import tiene efecto secundario: registra el setInterval.
+import { DashboardShell } from '@/components/layout/dashboard-shell'
+// Side-effect imports: arrancan workers periódicos del lado del server.
+// (cada módulo es idempotente y solo arranca un timer por proceso).
 import '@/lib/print-worker'
+import '@/modules/alerts/alert-worker'
 
-export default async function DashboardLayout({
-  children,
-}: {
-  children: React.ReactNode
-}) {
-  const user = await getCurrentUser()
+export const dynamic = 'force-dynamic'
 
-  if (!user) {
-    redirect('/login')
-  }
-
-  return (
-    <AppShell
-      user={{
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-      }}
-    >
-      {children}
-    </AppShell>
-  )
+export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+  return <DashboardShell>{children}</DashboardShell>
 }

@@ -304,6 +304,26 @@ model IntegrationSetting {
 }
 
 // ============================================================
+// Webhook Logs (auditoría de webhooks entrantes)
+// ============================================================
+
+model WebhookLog {
+  id           String   @id @default(cuid())
+  source       String   // shopify | payments | mastershop
+  provider     String?  // SHOPIFY | WOMPI | MASTERSHOP | ...
+  event        String?  // event type (orders/create, payment.approved, etc.)
+  signature    String?  // signature header value (HMAC)
+  payload      String   // raw body (JSON string)
+  headers      String?  // JSON serialized headers
+  ip           String?
+  status       String   @default("PENDING") // PENDING | PROCESSED | FAILED | DUPLICATE
+  result       String?  // JSON serialized result of processing
+  error        String?  // error message if failed
+  receivedAt   DateTime @default(now())
+  processedAt  DateTime?
+}
+
+// ============================================================
 // Sección 12: IA Insights
 // ============================================================
 

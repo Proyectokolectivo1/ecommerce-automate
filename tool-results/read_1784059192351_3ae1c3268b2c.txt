@@ -1,0 +1,1237 @@
+     1→'use client'
+     2→
+     3→// ============================================================
+     4→// /dashboard/integraciones — Integrations configuration panel
+     5→// ============================================================
+     6→// Página de configuración de integraciones. Client component que:
+     7→//   1) Lista los 9 proveedores agrupados en 4 secciones (Ecommerce,
+     8→//      Logística, Pasarelas de pago, Notificaciones).
+     9→//   2) Para cada proveedor muestra: icono, label, estado (activo/
+    10→//      inactivo, configurado/sin configurar), Switch de activación
+    11→//      (solo ADMIN) y botones "Configurar" + "Probar" (solo ADMIN).
+    12→//   3) Abre un Dialog con el formulario de configuración por
+    13→//      proveedor. Los secretos se enmascaran al mostrarlos y se
+    14→//      envían como string vacío si el usuario no los rellena.
+    15→//   4) Muestra los webhook URLs relevantes al pie del dialog.
+    16→//
+    17→// Endpoints consumidos (ya construidos por Task F2.3):
+    18→//   GET    /api/integrations
+    19→//   PUT    /api/integrations                  (ADMIN)
+    20→//   PATCH  /api/integrations/[provider]       (ADMIN)
+    21→//   POST   /api/integrations/[provider]       (ADMIN) test de conexión
+    22→
+    23→import { useMemo, useState } from 'react'
+    24→import { useSession } from 'next-auth/react'
+    25→import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+    26→import { toast } from 'sonner'
+    27→import {
+    28→  ShoppingBag,
+    29→  Truck,
+    30→  CreditCard,
+    31→  MessageCircle,
+    32→  Mail,
+    33→  Eye,
+    34→  EyeOff,
+    35→  Loader2,
+    36→  Zap,
+    37→  Settings2,
+    38→  ShieldCheck,
+    39→  ShieldAlert,
+    40→  Copy,
+    41→  Check,
+    42→  Lock,
+    43→  type LucideIcon,
+    44→} from 'lucide-react'
+    45→
+    46→import {
+    47→  Card,
+    48→  CardContent,
+    49→  CardDescription,
+    50→  CardFooter,
+    51→  CardHeader,
+    52→  CardTitle,
+    53→} from '@/components/ui/card'
+    54→import { Badge } from '@/components/ui/badge'
+    55→import { Button } from '@/components/ui/button'
+    56→import { Switch } from '@/components/ui/switch'
+    57→import { Input } from '@/components/ui/input'
+    58→import { Label } from '@/components/ui/label'
+    59→import {
+    60→  Dialog,
+    61→  DialogContent,
+    62→  DialogDescription,
+    63→  DialogFooter,
+    64→  DialogHeader,
+    65→  DialogTitle,
+    66→} from '@/components/ui/dialog'
+    67→import {
+    68→  Select,
+    69→  SelectContent,
+    70→  SelectItem,
+    71→  SelectTrigger,
+    72→  SelectValue,
+    73→} from '@/components/ui/select'
+    74→import { Skeleton } from '@/components/ui/skeleton'
+    75→
+    76→// ------------------------------------------------------------
+    77→// Types
+    78→// ------------------------------------------------------------
+    79→
+    80→type FieldType = 'text' | 'secret' | 'boolean' | 'select'
+    81→
+    82→interface ProviderField {
+    83→  key: string
+    84→  label: string
+    85→  type: FieldType
+    86→  options?: { value: string; label: string }[]
+    87→  placeholder?: string
+    88→  required?: boolean
+    89→}
+    90→
+    91→type ProviderKey =
+    92→  | 'SHOPIFY'
+    93→  | 'MASTERSHOP'
+    94→  | 'WOMPI'
+    95→  | 'PAYU'
+    96→  | 'MERCADOPAGO'
+    97→  | 'EPAYCO'
+    98→  | 'BOLD'
+    99→  | 'WHATSAPP'
+   100→  | 'EMAIL'
+   101→
+   102→type SectionKey = 'ecommerce' | 'logistica' | 'pagos' | 'notificaciones'
+   103→
+   104→interface ProviderMeta {
+   105→  key: ProviderKey
+   106→  label: string
+   107→  section: SectionKey
+   108→  icon: LucideIcon
+   109→  description: string
+   110→  fields: ProviderField[]
+   111→}
+   112→
+   113→interface IntegrationItem {
+   114→  provider: string
+   115→  active: boolean
+   116→  configured: boolean
+   117→  config: Record<string, unknown> | null
+   118→  updatedAt: string | null
+   119→}
+   120→
+   121→interface TestResult {
+   122→  ok: boolean
+   123→  message: string
+   124→  detail?: unknown
+   125→}
+   126→
+   127→// ------------------------------------------------------------
+   128→// Providers metadata
+   129→// ------------------------------------------------------------
+   130→
+   131→const CARRIER_OPTIONS = [
+   132→  { value: 'SERVIENTREGA', label: 'Servientrega' },
+   133→  { value: 'ENVIA', label: 'Envía' },
+   134→  { value: 'INTERRAPIDISIMO', label: 'Inter Rapidísimo' },
+   135→  { value: 'COORDINADORA', label: 'Coordinadora' },
+   136→  { value: 'TCC', label: 'TCC' },
+   137→]
+   138→
+   139→const EMAIL_PROVIDER_OPTIONS = [
+   140→  { value: 'resend', label: 'Resend' },
+   141→  { value: 'sendgrid', label: 'SendGrid' },
+   142→  { value: 'ses', label: 'Amazon SES' },
+   143→  { value: 'smtp', label: 'SMTP' },
+   144→]
+   145→
+   146→const PROVIDER_META: ProviderMeta[] = [
+   147→  {
+   148→    key: 'SHOPIFY',
+   149→    label: 'Shopify',
+   150→    section: 'ecommerce',
+   151→    icon: ShoppingBag,
+   152→    description:
+   153→      'Sincroniza pedidos, productos y webhooks desde tu tienda Shopify.',
+   154→    fields: [
+   155→      {
+   156→        key: 'shop',
+   157→        label: 'Shop domain',
+   158→        type: 'text',
+   159→        placeholder: 'mi-tienda.myshopify.com',
+   160→        required: true,
+   161→      },
+   162→      { key: 'accessToken', label: 'Access Token', type: 'secret', required: true },
+   163→      { key: 'apiSecret', label: 'API Secret', type: 'secret' },
+   164→      { key: 'apiKey', label: 'API Key', type: 'text' },
+   165→    ],
+   166→  },
+   167→  {
+   168→    key: 'MASTERSHOP',
+   169→    label: 'Mastershop',
+   170→    section: 'logistica',
+   171→    icon: Truck,
+   172→    description: 'Crea despachos y recibe callbacks de estado de guía.',
+   173→    fields: [
+   174→      {
+   175→        key: 'apiUrl',
+   176→        label: 'API URL',
+   177→        type: 'text',
+   178→        placeholder: 'https://api.mastershop.com',
+   179→        required: true,
+   180→      },
+   181→      { key: 'apiKey', label: 'API Key', type: 'secret', required: true },
+   182→      { key: 'merchantId', label: 'Merchant ID', type: 'text' },
+   183→      {
+   184→        key: 'defaultCarrier',
+   185→        label: 'Transportadora por defecto',
+   186→        type: 'select',
+   187→        options: CARRIER_OPTIONS,
+   188→      },
+   189→    ],
+   190→  },
+   191→  {
+   192→    key: 'WOMPI',
+   193→    label: 'Wompi',
+   194→    section: 'pagos',
+   195→    icon: CreditCard,
+   196→    description: 'Pasarela colombiana: tarjetas, PSE, Nequi y Efecty.',
+   197→    fields: [
+   198→      { key: 'publicKey', label: 'Public Key', type: 'secret', required: true },
+   199→      { key: 'privateKey', label: 'Private Key', type: 'secret', required: true },
+   200→      { key: 'integritySecret', label: 'Integrity Secret', type: 'secret' },
+   201→      { key: 'sandbox', label: 'Modo sandbox (pruebas)', type: 'boolean' },
+   202→    ],
+   203→  },
+   204→  {
+   205→    key: 'PAYU',
+   206→    label: 'PayU',
+   207→    section: 'pagos',
+   208→    icon: CreditCard,
+   209→    description: 'Pasarela con cobertura regional y métodos locales.',
+   210→    fields: [
+   211→      { key: 'apiKey', label: 'API Key', type: 'secret', required: true },
+   212→      { key: 'publicKey', label: 'Public Key', type: 'secret' },
+   213→      { key: 'merchantId', label: 'Merchant ID', type: 'text', required: true },
+   214→      { key: 'accountId', label: 'Account ID', type: 'text' },
+   215→      { key: 'sandbox', label: 'Modo sandbox (pruebas)', type: 'boolean' },
+   216→    ],
+   217→  },
+   218→  {
+   219→    key: 'MERCADOPAGO',
+   220→    label: 'Mercado Pago',
+   221→    section: 'pagos',
+   222→    icon: CreditCard,
+   223→    description: 'Pagos con Mercado Pago y Checkout Pro.',
+   224→    fields: [
+   225→      { key: 'apiKey', label: 'API Key', type: 'secret', required: true },
+   226→      {
+   227→        key: 'accessToken',
+   228→        label: 'Access Token',
+   229→        type: 'secret',
+   230→        required: true,
+   231→      },
+   232→      { key: 'secret', label: 'Webhook Secret', type: 'secret' },
+   233→      { key: 'sandbox', label: 'Modo sandbox (pruebas)', type: 'boolean' },
+   234→    ],
+   235→  },
+   236→  {
+   237→    key: 'EPAYCO',
+   238→    label: 'ePayco',
+   239→    section: 'pagos',
+   240→    icon: CreditCard,
+   241→    description: 'Pasarela colombiana con PSE, tarjetas y efectivo.',
+   242→    fields: [
+   243→      { key: 'publicKey', label: 'Public Key', type: 'secret', required: true },
+   244→      { key: 'privateKey', label: 'Private Key', type: 'secret', required: true },
+   245→      { key: 'merchantId', label: 'Merchant ID', type: 'text' },
+   246→      { key: 'secret', label: 'Webhook Secret', type: 'secret' },
+   247→      { key: 'sandbox', label: 'Modo sandbox (pruebas)', type: 'boolean' },
+   248→    ],
+   249→  },
+   250→  {
+   251→    key: 'BOLD',
+   252→    label: 'Bold',
+   253→    section: 'pagos',
+   254→    icon: CreditCard,
+   255→    description: 'Pasarela colombiana con link de pago y checkout Bold.',
+   256→    fields: [
+   257→      { key: 'apiKey', label: 'API Key', type: 'secret', required: true },
+   258→      { key: 'publicKey', label: 'Public Key', type: 'secret' },
+   259→      { key: 'secret', label: 'Webhook Secret', type: 'secret' },
+   260→      { key: 'sandbox', label: 'Modo sandbox (pruebas)', type: 'boolean' },
+   261→    ],
+   262→  },
+   263→  {
+   264→    key: 'WHATSAPP',
+   265→    label: 'WhatsApp',
+   266→    section: 'notificaciones',
+   267→    icon: MessageCircle,
+   268→    description: 'Envía notificaciones transaccionales por WhatsApp Cloud API.',
+   269→    fields: [
+   270→      {
+   271→        key: 'phoneNumberId',
+   272→        label: 'Phone Number ID',
+   273→        type: 'text',
+   274→        required: true,
+   275→      },
+   276→      { key: 'accessToken', label: 'Access Token', type: 'secret', required: true },
+   277→      {
+   278→        key: 'templateName',
+   279→        label: 'Template name',
+   280→        type: 'text',
+   281→        placeholder: 'pago_transporte',
+   282→      },
+   283→    ],
+   284→  },
+   285→  {
+   286→    key: 'EMAIL',
+   287→    label: 'Email',
+   288→    section: 'notificaciones',
+   289→    icon: Mail,
+   290→    description: 'Servidor transaccional para correos de pedido y envío.',
+   291→    fields: [
+   292→      {
+   293→        key: 'provider',
+   294→        label: 'Proveedor',
+   295→        type: 'select',
+   296→        options: EMAIL_PROVIDER_OPTIONS,
+   297→      },
+   298→      { key: 'apiKey', label: 'API Key', type: 'secret' },
+   299→      {
+   300→        key: 'fromAddress',
+   301→        label: 'From address',
+   302→        type: 'text',
+   303→        placeholder: 'no-reply@ecommerce.com',
+   304→        required: true,
+   305→      },
+   306→      {
+   307→        key: 'fromName',
+   308→        label: 'From name',
+   309→        type: 'text',
+   310→        placeholder: 'Ecommerce',
+   311→      },
+   312→    ],
+   313→  },
+   314→]
+   315→
+   316→interface SectionMeta {
+   317→  key: SectionKey
+   318→  title: string
+   319→  description: string
+   320→}
+   321→
+   322→const SECTIONS: SectionMeta[] = [
+   323→  {
+   324→    key: 'ecommerce',
+   325→    title: 'Ecommerce',
+   326→    description: 'Plataformas de origen de los pedidos.',
+   327→  },
+   328→  {
+   329→    key: 'logistica',
+   330→    title: 'Logística',
+   331→    description: 'Despachos y seguimiento de envíos.',
+   332→  },
+   333→  {
+   334→    key: 'pagos',
+   335→    title: 'Pasarelas de pago',
+   336→    description: 'Procesamiento de pagos online y COD.',
+   337→  },
+   338→  {
+   339→    key: 'notificaciones',
+   340→    title: 'Notificaciones',
+   341→    description: 'Comunicación con clientes y equipo.',
+   342→  },
+   343→]
+   344→
+   345→const PAYMENT_PROVIDERS = new Set<ProviderKey>([
+   346→  'WOMPI',
+   347→  'PAYU',
+   348→  'MERCADOPAGO',
+   349→  'EPAYCO',
+   350→  'BOLD',
+   351→])
+   352→
+   353→// ------------------------------------------------------------
+   354→// Helpers
+   355→// ------------------------------------------------------------
+   356→
+   357→/** Detecta si un valor viene enmascarado desde la API (ej: "••••12ab"). */
+   358→function isMasked(value: unknown): boolean {
+   359→  return typeof value === 'string' && value.startsWith('••••')
+   360→}
+   361→
+   362→/** Devuelve el valor "limpio" para mostrar en un input (vacío si está enmascarado). */
+   363→function displayValue(value: unknown): string {
+   364→  if (value == null) return ''
+   365→  if (isMasked(value)) return ''
+   366→  return String(value)
+   367→}
+   368→
+   369→/** Devuelve la info de webhook a mostrar al pie del dialog, si aplica. */
+   370→function getWebhookInfo(
+   371→  provider: ProviderKey,
+   372→  origin: string,
+   373→): { title: string; url: string; note: string } | null {
+   374→  if (provider === 'SHOPIFY') {
+   375→    return {
+   376→      title: 'Webhook Shopify',
+   377→      url: `${origin}/api/webhooks/shopify`,
+   378→      note: 'Registra este URL en Shopify Admin → Settings → Notifications → Webhooks (eventos order/create, order/paid, fulfillment).',
+   379→    }
+   380→  }
+   381→  if (provider === 'MASTERSHOP') {
+   382→    return {
+   383→      title: 'Callback Mastershop',
+   384→      url: `${origin}/api/webhooks/mastershop`,
+   385→      note: 'Configúralo como URL de callback de estado de guía en el panel de Mastershop.',
+   386→    }
+   387→  }
+   388→  if (PAYMENT_PROVIDERS.has(provider)) {
+   389→    return {
+   390→      title: 'Webhook de pagos',
+   391→      url: `${origin}/api/webhooks/payments`,
+   392→      note: `Configura este URL en el panel de la pasarela. El receptor identifica el proveedor con el header HTTP: X-Payment-Provider: ${provider}.`,
+   393→    }
+   394→  }
+   395→  return null
+   396→}
+   397→
+   398→/** Inicializa el estado del formulario a partir de la config del server. */
+   399→function initFormValues(
+   400→  meta: ProviderMeta,
+   401→  config: Record<string, unknown> | null,
+   402→): Record<string, string | boolean> {
+   403→  const values: Record<string, string | boolean> = {}
+   404→  for (const f of meta.fields) {
+   405→    const raw = config?.[f.key]
+   406→    if (f.type === 'boolean') {
+   407→      values[f.key] = raw === true || raw === 'true'
+   408→    } else {
+   409→      values[f.key] = displayValue(raw)
+   410→    }
+   411→  }
+   412→  return values
+   413→}
+   414→
+   415→// ============================================================
+   416→// Page
+   417→// ============================================================
+   418→
+   419→export default function IntegracionesPage() {
+   420→  const { data: session, status: sessionStatus } = useSession()
+   421→  const isAdmin = session?.user?.role === 'ADMIN'
+   422→  const qc = useQueryClient()
+   423→
+   424→  // ----------------------------------------------------------
+   425→  // Query: lista de integraciones
+   426→  // ----------------------------------------------------------
+   427→  const { data, isLoading, isError, refetch } = useQuery({
+   428→    queryKey: ['integrations'],
+   429→    queryFn: async () => {
+   430→      const res = await fetch('/api/integrations')
+   431→      if (!res.ok) {
+   432→        const err = (await res.json().catch(() => ({}))) as { error?: string }
+   433→        throw new Error(err?.error ?? `Error ${res.status}`)
+   434→      }
+   435→      const json = (await res.json()) as { integrations: IntegrationItem[] }
+   436→      return json.integrations
+   437→    },
+   438→  })
+   439→
+   440→  const integrations = data ?? []
+   441→
+   442→  const integrationsByProvider = useMemo(() => {
+   443→    const map = new Map<string, IntegrationItem>()
+   444→    for (const i of integrations) map.set(i.provider, i)
+   445→    return map
+   446→  }, [integrations])
+   447→
+   448→  const activeCount = integrations.filter((i) => i.active).length
+   449→
+   450→  // ----------------------------------------------------------
+   451→  // Mutation: toggle active
+   452→  // ----------------------------------------------------------
+   453→  const toggleMutation = useMutation({
+   454→    mutationFn: async (vars: { provider: string; active: boolean }) => {
+   455→      const res = await fetch(`/api/integrations/${vars.provider}`, {
+   456→        method: 'PATCH',
+   457→        headers: { 'Content-Type': 'application/json' },
+   458→        body: JSON.stringify({ active: vars.active }),
+   459→      })
+   460→      const json = (await res.json().catch(() => ({}))) as {
+   461→        ok?: boolean
+   462→        error?: string
+   463→      }
+   464→      if (!res.ok || !json.ok) {
+   465→        throw new Error(json?.error ?? `Error ${res.status}`)
+   466→      }
+   467→      return json
+   468→    },
+   469→    onSuccess: (_data, vars) => {
+   470→      toast.success(
+   471→        `${vars.provider}: ${vars.active ? 'Activado' : 'Desactivado'}`,
+   472→      )
+   473→      void qc.invalidateQueries({ queryKey: ['integrations'] })
+   474→    },
+   475→    onError: (err) => {
+   476→      toast.error(err instanceof Error ? err.message : 'Error al actualizar')
+   477→    },
+   478→  })
+   479→
+   480→  // ----------------------------------------------------------
+   481→  // Mutation: test connection
+   482→  // ----------------------------------------------------------
+   483→  const testMutation = useMutation({
+   484→    mutationFn: async (provider: string) => {
+   485→      const res = await fetch(`/api/integrations/${provider}`, {
+   486→        method: 'POST',
+   487→      })
+   488→      const json = (await res.json().catch(() => ({}))) as TestResult
+   489→      return { provider, result: json }
+   490→    },
+   491→    onSuccess: ({ provider, result }) => {
+   492→      const detail =
+   493→        typeof result.detail === 'string' ? result.detail : undefined
+   494→      if (result.ok) {
+   495→        toast.success(`${provider}: ${result.message}`, {
+   496→          description: detail,
+   497→        })
+   498→      } else {
+   499→        toast.error(`${provider}: ${result.message}`, {
+   500→          description: detail,
+   501→        })
+   502→      }
+   503→    },
+   504→    onError: (err) => {
+   505→      toast.error(err instanceof Error ? err.message : 'Error en el test')
+   506→    },
+   507→  })
+   508→
+   509→  // ----------------------------------------------------------
+   510→  // Mutation: save config (PUT)
+   511→  // ----------------------------------------------------------
+   512→  const saveMutation = useMutation({
+   513→    mutationFn: async (vars: {
+   514→      provider: string
+   515→      config: Record<string, unknown>
+   516→    }) => {
+   517→      const res = await fetch('/api/integrations', {
+   518→        method: 'PUT',
+   519→        headers: { 'Content-Type': 'application/json' },
+   520→        body: JSON.stringify(vars),
+   521→      })
+   522→      const json = (await res.json().catch(() => ({}))) as {
+   523→        ok?: boolean
+   524→        error?: string
+   525→      }
+   526→      if (!res.ok || !json.ok) {
+   527→        throw new Error(json?.error ?? `Error ${res.status}`)
+   528→      }
+   529→      return json
+   530→    },
+   531→    onSuccess: (_data, vars) => {
+   532→      toast.success('Configuración guardada', {
+   533→        description: vars.provider,
+   534→      })
+   535→      void qc.invalidateQueries({ queryKey: ['integrations'] })
+   536→      setOpenProvider(null)
+   537→    },
+   538→    onError: (err) => {
+   539→      toast.error(err instanceof Error ? err.message : 'Error al guardar')
+   540→    },
+   541→  })
+   542→
+   543→  // ----------------------------------------------------------
+   544→  // Dialog state
+   545→  // ----------------------------------------------------------
+   546→  const [openProvider, setOpenProvider] = useState<ProviderKey | null>(null)
+   547→
+   548→  const openMeta = openProvider
+   549→    ? PROVIDER_META.find((p) => p.key === openProvider) ?? null
+   550→    : null
+   551→  const openItem = openProvider
+   552→    ? integrationsByProvider.get(openProvider) ?? null
+   553→    : null
+   554→
+   555→  // ----------------------------------------------------------
+   556→  // Render
+   557→  // ----------------------------------------------------------
+   558→  return (
+   559→    <div className="mx-auto w-full max-w-7xl space-y-8 p-4 md:p-6">
+   560→      {/* Header */}
+   561→      <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+   562→        <div className="space-y-1">
+   563→          <h1 className="text-2xl font-bold tracking-tight">Integraciones</h1>
+   564→          <p className="text-sm text-muted-foreground">
+   565→            Configura las conexiones con Shopify, Mastershop, pasarelas de
+   566→            pago y notificaciones.
+   567→          </p>
+   568→        </div>
+   569→        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+   570→          <Badge
+   571→            variant="outline"
+   572→            className="gap-1.5 border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-300"
+   573→          >
+   574→            <ShieldCheck className="size-3" />
+   575→            {activeCount} activas
+   576→          </Badge>
+   577→          <Badge variant="outline" className="gap-1.5">
+   578→            <Settings2 className="size-3" />
+   579→            {integrations.length || 9} proveedores
+   580→          </Badge>
+   581→          {sessionStatus === 'loading' ? null : !isAdmin ? (
+   582→            <Badge variant="outline" className="gap-1.5">
+   583→              <Lock className="size-3" />
+   584→              Solo lectura
+   585→            </Badge>
+   586→          ) : null}
+   587→        </div>
+   588→      </header>
+   589→
+   590→      {/* Error banner */}
+   591→      {isError && (
+   592→        <div
+   593→          role="alert"
+   594→          className="flex flex-col gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm sm:flex-row sm:items-center sm:justify-between"
+   595→        >
+   596→          <div className="flex items-center gap-2 text-destructive">
+   597→            <ShieldAlert className="size-4 shrink-0" />
+   598→            <span>No se pudo cargar la configuración de integraciones.</span>
+   599→          </div>
+   600→          <Button
+   601→            size="sm"
+   602→            variant="outline"
+   603→            onClick={() => void refetch()}
+   604→            className="gap-1.5 self-start sm:self-auto"
+   605→          >
+   606→            Reintentar
+   607→          </Button>
+   608→        </div>
+   609→      )}
+   610→
+   611→      {/* Sections */}
+   612→      <div className="space-y-8">
+   613→        {SECTIONS.map((section) => {
+   614→          const metas = PROVIDER_META.filter((m) => m.section === section.key)
+   615→          return (
+   616→            <section key={section.key} className="space-y-3">
+   617→              <div className="flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
+   618→                <h2 className="text-lg font-semibold tracking-tight">
+   619→                  {section.title}
+   620→                </h2>
+   621→                <p className="text-xs text-muted-foreground">
+   622→                  {section.description}
+   623→                </p>
+   624→              </div>
+   625→
+   626→              <div className="grid gap-4 md:grid-cols-2">
+   627→                {isLoading
+   628→                  ? Array.from({ length: metas.length }).map((_, i) => (
+   629→                      <IntegrationCardSkeleton key={`sk-${section.key}-${i}`} />
+   630→                    ))
+   631→                  : metas.map((meta) => {
+   632→                      const item = integrationsByProvider.get(meta.key)
+   633→                      return (
+   634→                        <IntegrationCard
+   635→                          key={meta.key}
+   636→                          meta={meta}
+   637→                          item={item}
+   638→                          isAdmin={isAdmin}
+   639→                          sessionLoading={sessionStatus === 'loading'}
+   640→                          isToggling={
+   641→                            toggleMutation.isPending &&
+   642→                            toggleMutation.variables?.provider === meta.key
+   643→                          }
+   644→                          isTesting={
+   645→                            testMutation.isPending &&
+   646→                            testMutation.variables === meta.key
+   647→                          }
+   648→                          onToggle={(active) =>
+   649→                            toggleMutation.mutate({
+   650→                              provider: meta.key,
+   651→                              active,
+   652→                            })
+   653→                          }
+   654→                          onConfigure={() => setOpenProvider(meta.key)}
+   655→                          onTest={() => testMutation.mutate(meta.key)}
+   656→                        />
+   657→                      )
+   658→                    })}
+   659→              </div>
+   660→            </section>
+   661→          )
+   662→        })}
+   663→      </div>
+   664→
+   665→      {/* Config Dialog */}
+   666→      <ConfigDialog
+   667→        open={!!openProvider}
+   668→        onOpenChange={(o) => {
+   669→          if (!o) setOpenProvider(null)
+   670→        }}
+   671→        meta={openMeta}
+   672→        item={openItem}
+   673→        saving={saveMutation.isPending}
+   674→        onSave={(config) => {
+   675→          if (!openProvider) return
+   676→          saveMutation.mutate({ provider: openProvider, config })
+   677→        }}
+   678→      />
+   679→    </div>
+   680→  )
+   681→}
+   682→
+   683→// ============================================================
+   684→// Integration Card
+   685→// ============================================================
+   686→
+   687→interface IntegrationCardProps {
+   688→  meta: ProviderMeta
+   689→  item: IntegrationItem | undefined
+   690→  isAdmin: boolean
+   691→  sessionLoading: boolean
+   692→  isToggling: boolean
+   693→  isTesting: boolean
+   694→  onToggle: (active: boolean) => void
+   695→  onConfigure: () => void
+   696→  onTest: () => void
+   697→}
+   698→
+   699→function IntegrationCard({
+   700→  meta,
+   701→  item,
+   702→  isAdmin,
+   703→  sessionLoading,
+   704→  isToggling,
+   705→  isTesting,
+   706→  onToggle,
+   707→  onConfigure,
+   708→  onTest,
+   709→}: IntegrationCardProps) {
+   710→  const Icon = meta.icon
+   711→  const active = item?.active ?? false
+   712→  const configured = item?.configured ?? false
+   713→
+   714→  return (
+   715→    <Card className="gap-0 overflow-hidden">
+   716→      <CardHeader className="pb-3">
+   717→        <div className="flex items-start justify-between gap-3">
+   718→          <div className="flex items-start gap-3">
+   719→            <div
+   720→              className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-muted text-foreground"
+   721→              aria-hidden
+   722→            >
+   723→              <Icon className="size-5" />
+   724→            </div>
+   725→            <div className="space-y-0.5">
+   726→              <CardTitle className="text-base">{meta.label}</CardTitle>
+   727→              <CardDescription className="text-xs leading-relaxed">
+   728→                {meta.description}
+   729→              </CardDescription>
+   730→            </div>
+   731→          </div>
+   732→          {active ? (
+   733→            <Badge className="gap-1 border-transparent bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">
+   734→              <span className="size-1.5 rounded-full bg-emerald-500" />
+   735→              Activo
+   736→            </Badge>
+   737→          ) : (
+   738→            <Badge
+   739→              variant="secondary"
+   740→              className="gap-1 bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+   741→            >
+   742→              <span className="size-1.5 rounded-full bg-zinc-400" />
+   743→              Inactivo
+   744→            </Badge>
+   745→          )}
+   746→        </div>
+   747→      </CardHeader>
+   748→
+   749→      <CardContent className="space-y-3 pb-4">
+   750→        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+   751→          {configured ? (
+   752→            <>
+   753→              <Check className="size-3.5 text-emerald-500" />
+   754→              <span>Configurado</span>
+   755→              {item?.updatedAt && (
+   756→                <span className="text-muted-foreground/70">
+   757→                  · actualizado {formatRelative(item.updatedAt)}
+   758→                </span>
+   759→              )}
+   760→            </>
+   761→          ) : (
+   762→            <>
+   763→              <span className="size-3.5 rounded-full border border-dashed border-muted-foreground/50" />
+   764→              <span>Sin configurar</span>
+   765→            </>
+   766→          )}
+   767→        </div>
+   768→
+   769→        {/* Toggle (ADMIN only) */}
+   770→        {sessionLoading ? null : isAdmin ? (
+   771→          <div className="flex items-center justify-between rounded-md border bg-muted/40 px-3 py-2">
+   772→            <Label
+   773→              htmlFor={`toggle-${meta.key}`}
+   774→              className="cursor-pointer text-xs font-medium text-foreground"
+   775→            >
+   776→              Activar integración
+   777→            </Label>
+   778→            <div className="flex items-center gap-2">
+   779→              {isToggling && (
+   780→                <Loader2 className="size-3 animate-spin text-muted-foreground" />
+   781→              )}
+   782→              <Switch
+   783→                id={`toggle-${meta.key}`}
+   784→                checked={active}
+   785→                disabled={!configured || isToggling}
+   786→                onCheckedChange={(v) => onToggle(v)}
+   787→                aria-label={`Activar o desactivar ${meta.label}`}
+   788→              />
+   789→            </div>
+   790→          </div>
+   791→        ) : null}
+   792→      </CardContent>
+   793→
+   794→      <CardFooter className="gap-2 border-t bg-muted/30 py-3">
+   795→        {sessionLoading ? null : isAdmin ? (
+   796→          <>
+   797→            <Button
+   798→              size="sm"
+   799→              variant="default"
+   800→              className="gap-1.5"
+   801→              onClick={onConfigure}
+   802→            >
+   803→              <Settings2 className="size-4" />
+   804→              Configurar
+   805→            </Button>
+   806→            <Button
+   807→              size="sm"
+   808→              variant="outline"
+   809→              className="gap-1.5"
+   810→              onClick={onTest}
+   811→              disabled={!configured || isTesting}
+   812→            >
+   813→              {isTesting ? (
+   814→                <Loader2 className="size-4 animate-spin" />
+   815→              ) : (
+   816→                <Zap className="size-4" />
+   817→              )}
+   818→              Probar
+   819→            </Button>
+   820→          </>
+   821→        ) : (
+   822→          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+   823→            <Lock className="size-3.5" />
+   824→            Solo los administradores pueden editar la configuración.
+   825→          </p>
+   826→        )}
+   827→      </CardFooter>
+   828→    </Card>
+   829→  )
+   830→}
+   831→
+   832→// ============================================================
+   833→// Skeleton
+   834→// ============================================================
+   835→
+   836→function IntegrationCardSkeleton() {
+   837→  return (
+   838→    <Card className="gap-0">
+   839→      <CardHeader className="pb-3">
+   840→        <div className="flex items-start gap-3">
+   841→          <Skeleton className="size-10 rounded-lg" />
+   842→          <div className="flex-1 space-y-2">
+   843→            <Skeleton className="h-4 w-24" />
+   844→            <Skeleton className="h-3 w-full" />
+   845→            <Skeleton className="h-3 w-2/3" />
+   846→          </div>
+   847→          <Skeleton className="h-5 w-16 rounded-full" />
+   848→        </div>
+   849→      </CardHeader>
+   850→      <CardContent className="space-y-3 pb-4">
+   851→        <Skeleton className="h-3 w-32" />
+   852→        <Skeleton className="h-9 w-full rounded-md" />
+   853→      </CardContent>
+   854→      <CardFooter className="gap-2 border-t bg-muted/30 py-3">
+   855→        <Skeleton className="h-8 w-24 rounded-md" />
+   856→        <Skeleton className="h-8 w-20 rounded-md" />
+   857→      </CardFooter>
+   858→    </Card>
+   859→  )
+   860→}
+   861→
+   862→// ============================================================
+   863→// Config Dialog
+   864→// ============================================================
+   865→
+   866→interface ConfigDialogProps {
+   867→  open: boolean
+   868→  onOpenChange: (open: boolean) => void
+   869→  meta: ProviderMeta | null
+   870→  item: IntegrationItem | null
+   871→  saving: boolean
+   872→  onSave: (config: Record<string, unknown>) => void
+   873→}
+   874→
+   875→function ConfigDialog({
+   876→  open,
+   877→  onOpenChange,
+   878→  meta,
+   879→  item,
+   880→  saving,
+   881→  onSave,
+   882→}: ConfigDialogProps) {
+   883→  if (!meta) return null
+   884→
+   885→  return (
+   886→    <Dialog open={open} onOpenChange={onOpenChange}>
+   887→      <DialogContent className="thin-scroll max-h-[90vh] max-w-[calc(100%-2rem)] overflow-y-auto sm:max-w-lg">
+   888→        <DialogHeader>
+   889→          <DialogTitle className="flex items-center gap-2">
+   890→            <meta.icon className="size-5 text-muted-foreground" />
+   891→            Configurar {meta.label}
+   892→          </DialogTitle>
+   893→          <DialogDescription>{meta.description}</DialogDescription>
+   894→        </DialogHeader>
+   895→
+   896→        {/* El formulario se monta solo cuando el dialog está abierto
+   897→            para que el estado se reinicialice desde la config del server. */}
+   898→        {open && (
+   899→          <ConfigForm
+   900→            key={meta.key}
+   901→            meta={meta}
+   902→            item={item}
+   903→            saving={saving}
+   904→            onSave={onSave}
+   905→            onCancel={() => onOpenChange(false)}
+   906→          />
+   907→        )}
+   908→      </DialogContent>
+   909→    </Dialog>
+   910→  )
+   911→}
+   912→
+   913→// ============================================================
+   914→// Config Form (inside the dialog)
+   915→// ============================================================
+   916→
+   917→interface ConfigFormProps {
+   918→  meta: ProviderMeta
+   919→  item: IntegrationItem | null
+   920→  saving: boolean
+   921→  onSave: (config: Record<string, unknown>) => void
+   922→  onCancel: () => void
+   923→}
+   924→
+   925→function ConfigForm({
+   926→  meta,
+   927→  item,
+   928→  saving,
+   929→  onSave,
+   930→  onCancel,
+   931→}: ConfigFormProps) {
+   932→  // Inicializa el estado desde la config del server (vacío si enmascarado).
+   933→  const [values, setValues] = useState<Record<string, string | boolean>>(() =>
+   934→    initFormValues(meta, item?.config ?? null),
+   935→  )
+   936→
+   937→  function setValue(key: string, value: string | boolean) {
+   938→    setValues((prev) => ({ ...prev, [key]: value }))
+   939→  }
+   940→
+   941→  function handleSubmit(e: React.FormEvent) {
+   942→    e.preventDefault()
+   943→    const config: Record<string, unknown> = {}
+   944→    for (const f of meta.fields) {
+   945→      const v = values[f.key]
+   946→      if (f.type === 'boolean') {
+   947→        config[f.key] = v === true
+   948→      } else {
+   949→        config[f.key] = typeof v === 'string' ? v : ''
+   950→      }
+   951→    }
+   952→    onSave(config)
+   953→  }
+   954→
+   955→  return (
+   956→    <form onSubmit={handleSubmit} className="space-y-4">
+   957→      {/* Fields */}
+   958→      <div className="space-y-4">
+   959→        {meta.fields.map((field) => (
+   960→          <FieldRenderer
+   961→            key={field.key}
+   962→            field={field}
+   963→            value={values[field.key]}
+   964→            onChange={(v) => setValue(field.key, v)}
+   965→          />
+   966→        ))}
+   967→      </div>
+   968→
+   969→      {/* Webhook info */}
+   970→      <WebhookInfo provider={meta.key} />
+   971→
+   972→      {/* Footer */}
+   973→      <DialogFooter className="gap-2 pt-2">
+   974→        <Button
+   975→          type="button"
+   976→          variant="outline"
+   977→          onClick={onCancel}
+   978→          disabled={saving}
+   979→        >
+   980→          Cancelar
+   981→        </Button>
+   982→        <Button type="submit" disabled={saving} className="gap-2">
+   983→          {saving ? (
+   984→            <Loader2 className="size-4 animate-spin" />
+   985→          ) : (
+   986→            <Check className="size-4" />
+   987→          )}
+   988→          Guardar configuración
+   989→        </Button>
+   990→      </DialogFooter>
+   991→    </form>
+   992→  )
+   993→}
+   994→
+   995→// ============================================================
+   996→// Field renderer
+   997→// ============================================================
+   998→
+   999→interface FieldRendererProps {
+  1000→  field: ProviderField
+  1001→  value: string | boolean | undefined
+  1002→  onChange: (value: string | boolean) => void
+  1003→}
+  1004→
+  1005→function FieldRenderer({ field, value, onChange }: FieldRendererProps) {
+  1006→  if (field.type === 'boolean') {
+  1007→    return (
+  1008→      <div className="flex items-center justify-between gap-3 rounded-lg border bg-muted/40 px-3 py-2.5">
+  1009→        <div className="space-y-0.5">
+  1010→          <Label
+  1011→            htmlFor={field.key}
+  1012→            className="cursor-pointer text-sm font-medium"
+  1013→          >
+  1014→            {field.label}
+  1015→          </Label>
+  1016→        </div>
+  1017→        <Switch
+  1018→          id={field.key}
+  1019→          checked={value === true}
+  1020→          onCheckedChange={(v) => onChange(v)}
+  1021→        />
+  1022→      </div>
+  1023→    )
+  1024→  }
+  1025→
+  1026→  if (field.type === 'select') {
+  1027→    const currentValue =
+  1028→      typeof value === 'string' && value !== '' ? value : undefined
+  1029→    return (
+  1030→      <div className="space-y-1.5">
+  1031→        <Label htmlFor={field.key} className="text-sm font-medium">
+  1032→          {field.label}
+  1033→        </Label>
+  1034→        <Select
+  1035→          value={currentValue}
+  1036→          onValueChange={(v) => onChange(v)}
+  1037→        >
+  1038→          <SelectTrigger id={field.key} className="w-full">
+  1039→            <SelectValue placeholder="Selecciona una opción…" />
+  1040→          </SelectTrigger>
+  1041→          <SelectContent>
+  1042→            {field.options?.map((o) => (
+  1043→              <SelectItem key={o.value} value={o.value}>
+  1044→                {o.label}
+  1045→              </SelectItem>
+  1046→            ))}
+  1047→          </SelectContent>
+  1048→        </Select>
+  1049→      </div>
+  1050→    )
+  1051→  }
+  1052→
+  1053→  if (field.type === 'secret') {
+  1054→    return <SecretField field={field} value={value} onChange={onChange} />
+  1055→  }
+  1056→
+  1057→  // text
+  1058→  const textValue = typeof value === 'string' ? value : ''
+  1059→  return (
+  1060→    <div className="space-y-1.5">
+  1061→      <Label htmlFor={field.key} className="text-sm font-medium">
+  1062→        {field.label}
+  1063→        {field.required ? (
+  1064→          <span className="text-destructive" aria-hidden>
+  1065→            {' '}
+  1066→            *
+  1067→          </span>
+  1068→        ) : null}
+  1069→      </Label>
+  1070→      <Input
+  1071→        id={field.key}
+  1072→        type="text"
+  1073→        value={textValue}
+  1074→        onChange={(e) => onChange(e.target.value)}
+  1075→        placeholder={field.placeholder}
+  1076→        autoComplete="off"
+  1077→      />
+  1078→    </div>
+  1079→  )
+  1080→}
+  1081→
+  1082→// ============================================================
+  1083→// Secret field (with show/hide toggle)
+  1084→// ============================================================
+  1085→
+  1086→interface SecretFieldProps {
+  1087→  field: ProviderField
+  1088→  value: string | boolean | undefined
+  1089→  onChange: (value: string) => void
+  1090→}
+  1091→
+  1092→function SecretField({ field, value, onChange }: SecretFieldProps) {
+  1093→  const [show, setShow] = useState(false)
+  1094→  const raw = typeof value === 'string' ? value : ''
+  1095→  const masked = isMasked(raw)
+  1096→  const display = masked ? '' : raw
+  1097→  const placeholder = masked
+  1098→    ? '•••• (dejar vacío para mantener)'
+  1099→    : (field.placeholder ?? '')
+  1100→
+  1101→  return (
+  1102→    <div className="space-y-1.5">
+  1103→      <Label htmlFor={field.key} className="text-sm font-medium">
+  1104→        {field.label}
+  1105→        {field.required ? (
+  1106→          <span className="text-destructive" aria-hidden>
+  1107→            {' '}
+  1108→            *
+  1109→          </span>
+  1110→        ) : null}
+  1111→      </Label>
+  1112→      <div className="relative">
+  1113→        <Input
+  1114→          id={field.key}
+  1115→          type={show ? 'text' : 'password'}
+  1116→          value={display}
+  1117→          onChange={(e) => onChange(e.target.value)}
+  1118→          placeholder={placeholder}
+  1119→          autoComplete="off"
+  1120→          className="pr-10"
+  1121→        />
+  1122→        <Button
+  1123→          type="button"
+  1124→          variant="ghost"
+  1125→          size="icon"
+  1126→          tabIndex={-1}
+  1127→          onClick={() => setShow((s) => !s)}
+  1128→          className="absolute top-0 right-0 h-9 w-9 text-muted-foreground hover:text-foreground"
+  1129→          aria-label={show ? 'Ocultar valor' : 'Mostrar valor'}
+  1130→        >
+  1131→          {show ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+  1132→        </Button>
+  1133→      </div>
+  1134→      {masked ? (
+  1135→        <p className="text-[11px] text-muted-foreground">
+  1136→          Ya hay un valor guardado. Para reemplazarlo escribe uno nuevo.
+  1137→        </p>
+  1138→      ) : null}
+  1139→    </div>
+  1140→  )
+  1141→}
+  1142→
+  1143→// ============================================================
+  1144→// Webhook info (read-only with copy button)
+  1145→// ============================================================
+  1146→
+  1147→interface WebhookInfoProps {
+  1148→  provider: ProviderKey
+  1149→}
+  1150→
+  1151→function WebhookInfo({ provider }: WebhookInfoProps) {
+  1152→  // El origin se resuelve al vuelo cuando se abre el dialog (post-mount,
+  1153→  // siempre en cliente), por eso no hay riesgo de mismatch SSR.
+  1154→  const origin = typeof window !== 'undefined' ? window.location.origin : ''
+  1155→  const info = getWebhookInfo(provider, origin)
+  1156→  const [copied, setCopied] = useState(false)
+  1157→  if (!info) return null
+  1158→
+  1159→  async function handleCopy() {
+  1160→    try {
+  1161→      await navigator.clipboard.writeText(info!.url)
+  1162→      setCopied(true)
+  1163→      toast.success('URL copiada al portapapeles')
+  1164→      setTimeout(() => setCopied(false), 1800)
+  1165→    } catch {
+  1166→      toast.error('No se pudo copiar la URL')
+  1167→    }
+  1168→  }
+  1169→
+  1170→  return (
+  1171→    <div className="rounded-lg border border-dashed bg-muted/40 p-3">
+  1172→      <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-foreground">
+  1173→        <span className="inline-flex size-4 items-center justify-center rounded bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">
+  1174→          <Copy className="size-3" />
+  1175→        </span>
+  1176→        {info.title}
+  1177→      </div>
+  1178→      <div className="flex items-stretch gap-1.5">
+  1179→        <Input
+  1180→          readOnly
+  1181→          value={info.url}
+  1182→          className="h-8 bg-background font-mono text-xs"
+  1183→          aria-label={info.title}
+  1184→          onFocus={(e) => e.currentTarget.select()}
+  1185→        />
+  1186→        <Button
+  1187→          type="button"
+  1188→          size="sm"
+  1189→          variant="outline"
+  1190→          className="h-8 shrink-0 gap-1.5"
+  1191→          onClick={() => void handleCopy()}
+  1192→        >
+  1193→          {copied ? (
+  1194→            <Check className="size-3.5 text-emerald-500" />
+  1195→          ) : (
+  1196→            <Copy className="size-3.5" />
+  1197→          )}
+  1198→          <span className="hidden sm:inline">
+  1199→            {copied ? 'Copiado' : 'Copiar'}
+  1200→          </span>
+  1201→        </Button>
+  1202→      </div>
+  1203→      <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+  1204→        {info.note}
+  1205→      </p>
+  1206→    </div>
+  1207→  )
+  1208→}
+  1209→
+  1210→// ============================================================
+  1211→// Utils
+  1212→// ============================================================
+  1213→
+  1214→/** Formatea una fecha ISO como tiempo relativo corto en español. */
+  1215→function formatRelative(iso: string): string {
+  1216→  try {
+  1217→    const date = new Date(iso)
+  1218→    const now = Date.now()
+  1219→    const diffMs = now - date.getTime()
+  1220→    const diffMin = Math.floor(diffMs / 60_000)
+  1221→    if (diffMin < 1) return 'hace instantes'
+  1222→    if (diffMin < 60) return `hace ${diffMin} min`
+  1223→    const diffH = Math.floor(diffMin / 60)
+  1224→    if (diffH < 24) return `hace ${diffH} h`
+  1225→    const diffD = Math.floor(diffH / 24)
+  1226→    if (diffD < 30) return `hace ${diffD} d`
+  1227→    // Fallback: short date
+  1228→    return date.toLocaleDateString('es-CO', {
+  1229→      year: 'numeric',
+  1230→      month: 'short',
+  1231→      day: 'numeric',
+  1232→    })
+  1233→  } catch {
+  1234→    return ''
+  1235→  }
+  1236→}
+  1237→

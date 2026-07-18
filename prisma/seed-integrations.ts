@@ -52,6 +52,11 @@ const defaults = [
     config: { provider: 'resend', apiKey: '', fromAddress: 'no-reply@ecommerce.com', fromName: 'Ecommerce' },
     active: false,
   },
+  {
+    provider: 'AI_LLM',
+    config: { provider: 'z-ai-sdk', apiKey: '', apiUrl: '', model: '' },
+    active: false,
+  },
 ]
 
 async function main() {

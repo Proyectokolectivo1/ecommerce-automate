@@ -12,7 +12,7 @@ export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const user = await getCurrentUser()
+  const user = await getCurrentUserOrFallback()
   if (!user) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 })
   }

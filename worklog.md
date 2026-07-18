@@ -529,3 +529,239 @@ Stage Summary:
 - Notificación al cliente orquestada (WhatsApp + Email HTML, modo mock sin creds).
 - FSM corregida para permitir despacho directo desde PAGO_TRANSPORTE_CONFIRMADO.
 - Servicios activos: dev server (3000) + realtime (3003) + print worker (background).
+
+---
+Task ID: RESTORE-1
+Agent: backend-restorer
+Task: Recreación de backend perdido (customers, analytics, webhooks, admin, audit + 11 API routes)
+
+Work Log:
+- Leí worklog.md para entender arquitectura hexagonal (src/modules/), FSM de 8 estados, patrones de los servicios existentes (order.service, payment.service, sales.metrics) y la API (auth con getCurrentUserOrFallback para GET, getCurrentUser + requireRole para POST/PUT/DELETE).
+- Verifiqué utilidades base: db.ts (PrismaClient singleton), logger.ts (structured), auth.ts (getCurrentUser/getCurrentUserOrFallback/requireRole + AuthError), auth-utils.ts (hashPassword sha256 + Role type), validation.ts (Zod enums incl. CUSTOMER_CLASSIFICATIONS, ROLES), format.ts (formatCOP/formatDate/cn), audit.ts (audit.log helper).
+- **Schema Prisma**: el modelo `WebhookLog` faltaba en `prisma/schema.prisma`. Lo añadí con campos: id, source, provider?, event?, signature?, payload (raw body string), headers (JSON), ip?, status (PENDING|PROCESSED|FAILED|DUPLICATE), result?, error?, receivedAt, processedAt?. Ejecuté `bun run db:push` exitosamente (Prisma Client regenerado v6.19.2).
+
+- **`src/modules/customers/classification.ts`** (~140 líneas, pure functions):
+  * `CLASSIFICATION_THRESHOLDS`: VIP_MIN_SPENT=2_000_000, VIP_MIN_ORDERS=5, FRECUENTE_MIN_ORDERS=3, INACTIVE_DAYS=90.
+  * `CLASSIFICATION_LABELS` (VIP/Frecuente/Nuevo/Inactivo) y `CLASSIFICATION_BADGE_CLASSES` (ámbar/teal/zinc/rose — sin indigo/azul).
+  * `classifyCustomer(stats, now?)`: prioridad VIP > FRECUENTE > INACTIVO > NUEVO. Devuelve `{classification, reasons[]}` para auditoría.
+  * `calculateDaysSinceLastOrder(lastOrderAt, now?)`: devuelve `Infinity` si no hay fecha.
+  * `buildCustomerStats(customer)`: normaliza nulls a 0.
+  * `needsReclassification(currentClassification, stats, now?)`: compara clasificación actual vs calculada.
+
+- **`src/modules/customers/customer.service.ts`** (~310 líneas):
+  * `listCustomers(filters)`: paginación (limit 1-200, offset), filtros search (name/email/phone/city), classification, city; sortBy configurable (name/totalSpent/ordersCount/lastOrderAt/createdAt) + sortDir; incluye `_count: { orders }`.
+  * `getCustomerById(id)`: incluye últimas 50 órdenes (orderNumber, status, paymentMethod, total, placedAt, city + _count shipments/returns) + _count total.
+  * `getCustomerStats()`: total, byClassification (VIP/FRECUENTE/NUEVO/INACTIVO), withEmail, withPhone, byCity (top 10), avgSpent, totalSpent, totalOrders, inactiveCount (sin orden en últimos 90 días).
+  * `reclassifyCustomer(id)`: recalcula clasificación, actualiza DB si cambió, devuelve `{from, to, changed, reasons[]}`.
+  * `reclassifyAllCustomers()`: cursor-based pagination en lotes de 200, transacción para updates, devuelve solo los cambiados.
+  * `updateCustomerStatsAfterOrder(customerId, total, placedAt)`: incrementa totalSpent/ordersCount, setea lastOrderAt al máximo.
+  * `adjustCustomerStatsOnCancellation(customerId, total)`: decrementa totalSpent/ordersCount con floor en 0.
+  * Re-exporta helpers de classification.ts para conveniencia.
+  * `CustomerNotFoundError` con code `CUSTOMER_NOT_FOUND`.
+
+- **`src/modules/analytics/product.analytics.ts`** (~315 líneas):
+  * `aggregateProductData()`: trae OrderItem de pedidos no CANCELADO/DEVUELTO, agrega por producto en memoria (quantity, revenue, costTotal, orderIds Set).
+  * `getStarProducts(limit=5)`: top 5 por quantity, top 5 por revenue, top 5 por profit (3 rankings paralelos sobre el mismo dataset).
+  * `getProductRanking(filters)`: search (title/sku), activeOnly, sortBy (quantity/revenue/profit/margin/ordersCount) + sortDir, paginación.
+  * `getProductStats()`: totalProducts, activeProducts, totalUnitsSold, totalRevenue, avgMargin (profit/revenue * 100).
+
+- **`src/modules/analytics/returns.metrics.ts`** (~210 líneas):
+  * `getReturnsDetailedMetrics()`: count, totalOrders, rate (%), lostValue, topProduct (string|null), topCity (string|null), topProducts[] (id/label/count/lostValue, top 5), topCities[] (mismo shape).
+  * `getReturnsList(filters)`: search (orderNumber/product title/sku/reason), status (RECEIVED/INSPECTED/RESTOCKED/DISCARDED), city (busca en Return.city con fallback a Order.city), productId, paginación. Devuelve ReturnListItem con orderNumber, orderStatus, productTitle, productSku.
+
+- **`src/modules/analytics/profitability.metrics.ts`** (~265 líneas):
+  * `getProfitabilityByPeriod(period)`: day/week/month/year/all. Calcula revenue (sum order.total no cancelado/devuelto), transportCollected (sum shippingCost), totalRevenue, costs (CostEntry del periodo + fallback a OrderItem para PRODUCT), grossProfit (totalRevenue - product - shipping), netProfit (totalRevenue - totalCosts), margin (%), ordersCount.
+  * `getProfitabilityTrend(days=30)`: array de puntos diarios con revenue/costs/profit/margin/ordersCount. Distribuye costos no-PRODUCT proporcionalmente entre los días.
+  * `getCostBreakdown(costs)`: helper que normaliza y redondea a 2 decimales.
+  * `ProfitabilityPeriod` type exported.
+
+- **`src/modules/webhooks/webhook-log.service.ts`** (~370 líneas):
+  * `logWebhook(input)`: persiste con status PENDING, devuelve id. Fire-safe (no rompe flujo si falla DB).
+  * `markProcessed(logId, result?)`: setea PROCESSED + processedAt + result (JSON), limpia error.
+  * `markFailed(logId, error)`: setea FAILED + processedAt + error (truncado a 1000 chars).
+  * `markDuplicate(logId)`: setea DUPLICATE + processedAt.
+  * `listWebhookLogs(filters)`: filtros source/provider/status/search/startDate/endDate + paginación. Devuelve WebhookLogListItem (sin payload completo, con payloadSize).
+  * `getWebhookStats()`: total, pending/processed/failed/duplicate, bySource[], byProvider[], recent24h.
+  * `getWebhookLogById(id)`: incluye payload completo + headers + result para inspección.
+  * `WebhookLogNotFoundError` con code.
+
+- **`src/modules/admin/user.service.ts`** (~290 líneas):
+  * `SafeUser` interface (sin passwordHash) — devuelto por todas las funciones de lectura.
+  * `listUsers(filters)`: search (email/name), role, active (boolean|undefined), paginación.
+  * `getUserById(id)`: devuelve SafeUser o null.
+  * `createUser(input)`: valida email único, password ≥6 chars, hashea con `hashPassword` de auth-utils. Email lowercase trim.
+  * `updateUser(id, input, actorId?)`: updates parciales. Previene auto-desactivación y auto-cambio de rol si actorId === id. Verifica email único si cambió.
+  * `deleteUser(id, actorId?)`: SOFT delete (active=false). Previene auto-borrado. Previene eliminación del último ADMIN activo.
+  * `getUserStats()`: total, active, inactive, byRole, recentLogins24h.
+  * `UserError` class con `code` y `statusCode` (400 default, 404 not-found, 409 conflict, 403 forbidden).
+
+- **`src/modules/admin/audit.service.ts`** (~220 líneas):
+  * `listAuditLogs(filters)`: search (action/entity/entityId/ip/metadata/user.email/user.name), action, entity, userId, startDate/endDate + paginación. Include `user` relation (id/name/email).
+  * `getAuditStats()`: total, recent24h, recent7d, byAction[] (top 15), byEntity[] (top 15), topUsers[] (top 5 con nombre resuelto).
+  * `getDistinctActions()`: para filtros UI.
+  * `getDistinctEntities()`: para filtros UI.
+  * `parseMetadata` helper: JSON.parse con fallback a `{_raw}`.
+
+- **API Routes (11 archivos)**:
+  * `GET /api/customers` — listado + stats (con `?stats=true`). Filtros: search, classification, city, sortBy, sortDir, limit, offset. Usa getCurrentUserOrFallback.
+  * `GET /api/customers/[id]` — detalle con órdenes (50) + _count.
+  * `GET /api/admin/users` — listado + stats. `POST /api/admin/users` — create (ADMIN, Zod: email/password≥6/role/active?). Usa requireRole + audit.log USER_CREATE.
+  * `GET /api/admin/users/[id]` — detalle. `PUT` — update (ADMIN, Zod: email?/name?/password?/role?/active?). `DELETE` — soft delete (ADMIN). Audit USER_UPDATE / USER_DELETE.
+  * `GET /api/audit` — listado + stats + `?distinct=actions|entities` para filtros UI.
+  * `GET /api/analytics/products` — `?view=star|stats|ranking` (default combina star+stats). Filtros ranking: search, activeOnly, sortBy, sortDir, limit, offset.
+  * `GET /api/analytics/returns` — `?view=metrics|list` (default combina metrics+list limit=10). Filtros: search, status, city, productId.
+  * `GET /api/analytics/profitability` — `?view=period|trend|breakdown` (default combina period+trend). Param `period` (day/week/month/year/all) y `days` (1-90).
+  * `GET /api/webhooks/log` — listado + stats. Filtros: search, source, provider, status, startDate, endDate.
+  * `POST /api/webhooks/log/[id]/replay` — ADMIN. Reenvía el payload original al endpoint interno (shopify/payments/mastershop) con fetch a NEXTAUTH_URL+endpoint, reconstruye headers, marca el log con el resultado (markProcessed/markFailed). Audit WEBHOOK_REPLAY / WEBHOOK_REPLAY_FAILED.
+  * `GET /api/export` — CSV. `?type=orders|customers|returns` (default orders). Limit hasta 1000. Headers: Content-Type text/csv, Content-Disposition attachment. Escapa comas/comillas/saltos en valores.
+
+- **Lint fixes**:
+  * `product.analytics.ts:106` — parsing error por select sin comas entre campos. Añadí comas.
+  * `audit.service.ts:46` — `AuditLogDetail extends AuditLogListItem {}` interface vacía. Cambiado a `type AuditLogDetail = AuditLogListItem`.
+  * `webhook-log.service.ts:342` — `WebhookStatsResult extends WebhookLogStats {}` interface vacía. Cambiado a `type WebhookStatsResult = WebhookLogStats` (declarado temprano, eliminada la definición vacía al final).
+
+- **Verificación e2e** (sin auth — fallback a usuario SERVICIO anónimo):
+  * `GET /api/customers` → 200, lista de 9 clientes con _count.orders.
+  * `GET /api/customers?stats=true` → 200, KPIs + lista.
+  * `GET /api/customers/[id]` → 200, cliente con 50 órdenes anidadas.
+  * `GET /api/admin/users?stats=true` → 200, 4 usuarios (sin passwordHash), stats.
+  * `GET /api/audit?stats=true&limit=3` → 200, audit logs con user relation.
+  * `GET /api/analytics/products?view=stats` → 200, `{totalProducts:7, activeProducts:7, totalUnitsSold:23, totalRevenue:1997800, avgMargin:54.15}`.
+  * `GET /api/analytics/returns?view=metrics` → 200, `{count:1, totalOrders:16, rate:6.25, lostValue:26490, topProduct:"Smartwatch Deportivo", topCity:"Pereira", topProducts:[...], topCities:[...]}`.
+  * `GET /api/analytics/profitability?view=period&period=month` → 200, breakdown completo con costs.
+  * `GET /api/webhooks/log?stats=true` → 200, logs vacíos + stats en 0 (no hay webhooks registrados aún).
+  * `GET /api/export?type=orders&limit=3` → 200, CSV con headers + 3 filas.
+  * `POST /api/webhooks/log/nonexistent/replay` (no auth) → 401 (AuthError, "No autenticado").
+  * `POST /api/admin/users` (no auth) → 401.
+  * `bun run lint` → 0 errores, 0 warnings.
+  * dev.log: sin errores runtime en mis archivos. Solo el bug preexistente en `/api/guides`, `/api/orders`, `/api/analytics` (llaman `getCurrentUserOrFallback` sin importarla) — no está en mi scope, no lo toqué.
+
+Stage Summary:
+- 8 archivos de módulos creados: classification.ts, customer.service.ts, product.analytics.ts, returns.metrics.ts, profitability.metrics.ts, webhook-log.service.ts, user.service.ts, audit.service.ts (~2100 líneas totales).
+- 11 API routes creadas: customers (2), admin/users (2), audit (1), analytics/products|returns|profitability (3), webhooks/log (1), webhooks/log/[id]/replay (1), export (1).
+- 1 modelo Prisma añadido: WebhookLog (con db:push exitoso).
+- Lint limpio (0 errores). Dev server saludable. Endpoints verificados e2e con datos reales del seed.
+- Patrones respetados: `@/` alias en todos los imports, `db` de `@/lib/db`, `logger` de `@/lib/logger`, `getCurrentUserOrFallback` para GET, `getCurrentUser + requireRole` para POST/PUT/DELETE, `Prisma` type imports para tipos, `audit.log` para acciones ADMIN, Zod para validación de inputs en POST/PUT.
+- Pendiente (no en mi scope): los bugs preexistentes en `/api/orders`, `/api/analytics`, `/api/orders/[id]`, `/api/guides` donde se llama `getCurrentUserOrFallback` sin importarla. Las páginas `/dashboard/usuarios` y `/dashboard/auditoria` también devuelven 404 — no las creé porque no estaban en mi task (solo API routes).
+
+---
+Task ID: RESTORE-2
+Agent: full-stack-developer
+Task: Recrear backend de IA Insights + Alerts (10 archivos nuevos + 1 editado)
+
+Work Log:
+- Leí worklog.md y archivos existentes: lib/{db,logger,auth,realtime,audit,validation,cache,print-worker}.ts, prisma/schema.prisma, modules/analytics/{index,sales.metrics}.ts, app/api/{analytics,orders/stats,orders/[id]/dispatch}/route.ts, package.json, README del z-ai-web-dev-sdk.
+- Confirmé modelos AiInsight y Alert disponibles, enums AiInsightType/AlertType/AlertSeverity en validation.ts.
+
+- Creé src/modules/ai/ai.service.ts (ÚNICA importación de z-ai-web-dev-sdk en el repo):
+  - callLLM(systemPrompt, userPrompt) → string|null. Usa ZAI.create() → zai.chat.completions.create({ messages, thinking: { type: 'disabled' } }). Devuelve null si falla (no lanza).
+  - saveInsight(input) → AiInsightResult. metadata serializada a JSON con flag aiGenerated dentro.
+  - listInsights(filters) → { insights, total }. Filtro aiGenerated vía metadata contains (SQLite sin JSON nativo).
+  - getLatestInsight(type), getAiStats() → { total, byType, aiGenerated, fallback, lastGeneratedAt }.
+
+- Creé src/modules/ai/predict-sales.ts:
+  - calculatePrediction(history) — PURA: regresión lineal (least squares) + media móvil 7d. Devuelve { forecast[7], avgDailyRevenue, trend, trendPercentage, totalProjected7d, confidence }. Confianza ∝ 1 − cv(revenues).
+  - generateSalesPrediction() — LLM si ≥5 días con ventas, sino fallback tabular.
+
+- Creé src/modules/ai/detect-anomalies.ts:
+  - detectAnomalies(history, returnsByDay, threshold=3) — PURA: spike si revenue > media+2σ, drop si < media−2σ, HIGH_RETURNS si día con >3 devoluciones.
+  - generateAnomalyReport() — LLM con fallback.
+
+- Creé src/modules/ai/monthly-summary.ts:
+  - collectMonthlyKpis() — Promise.all de getSalesKPIs('month'), getProfitability, getReturnsMetrics, getTopProducts(5).
+  - generateMonthlySummary() — LLM con prompt estructurado + fallback tabular.
+
+- Creé src/modules/ai/product-analysis.ts:
+  - collectProductData(limit=10) — getTopProducts + groupBy returns + inventario.
+  - generateProductAnalysis() — LLM con fallback (insights por margen<15%, devoluciones≥2, inventario<10).
+
+- Creé src/modules/alerts/alert-evaluators.ts:
+  - 5 evaluadores: evaluateCodUnpaid (>24h en PENDIENTE_PAGO_TRANSPORTE, WARNING), evaluateGuideError (ENVIADO sin guideNumber, CRITICAL), evaluateHighReturn (>15% global, CRITICAL entity=null), evaluateLowInventory (<10 uds, CRITICAL si 0), evaluateSalesDrop (>30% sem vs sem, CRITICAL entity=null).
+  - ALERT_EVALUATORS array + ALERT_THRESHOLDS exportadas.
+  - evaluateAllAlerts() → { conditions, results } con Promise.allSettled. Cada AlertEvaluatorResult incluye { name, type, status, conditions, error?, durationMs }.
+
+- Creé src/modules/alerts/alert.service.ts:
+  - createAlertIfNotExists(condition) — dedup por (type + entity). entity null también deduplica correctamente. Emite emitAlert() realtime al crear.
+  - processAlertConditions(conditions) — batch concurrencia 5 → { evaluated, created, duplicates, createdIds }.
+  - listAlerts(filters) — paginado, orden resolved ASC + createdAt DESC (activas primero).
+  - resolveAlert(id) — resolved=true + resolvedAt=now. Lanza AlertNotFoundError si no existe.
+  - getAlertStats() — { total, active, resolved, byType, bySeverity, critical } con groupBy.
+
+- Creé src/modules/alerts/alert-worker.ts:
+  - runAlertWorkerTick() — idempotente (flag `running`). Destructura { conditions } de evaluateAllAlerts y llama processAlertConditions.
+  - startAlertWorker() — setInterval 5min (300000ms) + primer tick diferido 10s. timer.unref?.() para no bloquear shutdown.
+  - Auto-start: `if (typeof window === 'undefined') startAlertWorker()`.
+
+- Creé 7 API routes:
+  - GET /api/ai/insights (getCurrentUserOrFallback) → lista + stats.
+  - POST /api/ai/predict|anomalies|summary|products (requireRole ADMIN, GERENCIA) → 201 + insight.
+  - GET /api/alerts (getCurrentUserOrFallback) → lista + stats; POST ?evaluate=true (requireRole ADMIN) → { ok, evaluated, created, duplicates, evaluatorResults, durationMs }.
+  - POST /api/alerts/[id]/resolve (requireRole ADMIN, GERENCIA, SERVICIO) → 200 + alert | 404.
+
+- Edité src/app/(dashboard)/layout.tsx: añadidos side-effect imports `import '@/lib/print-worker'` + `import '@/modules/alerts/alert-worker'` para que ambos workers arranquen al cargar el dashboard.
+
+Verificación end-to-end (login admin@demo.com/admin123):
+- GET /api/ai/insights → 200 con lista semilla + stats.
+- POST /api/ai/predict → 201, LLM generated en 14s. Trend +51.4%, totalProjected $1.412.844 COP.
+- POST /api/ai/anomalies → 201, LLM generated en 5s. 1 anomalía detectada.
+- POST /api/ai/summary → 201, LLM generated en 12s. KPIs mensuales.
+- POST /api/ai/products → 201, LLM generated en 9s. Top 7 productos, margen 54.15%.
+- POST /api/ai/predict sin auth → 401 "No autenticado".
+- GET /api/alerts → 200 con 4 alertas semilla + stats (total=4, active=3, resolved=1, critical=1).
+- POST /api/alerts?evaluate=true → 200, evaluated=5, created=5, duplicates=0 (3 COD_UNPAID + 2 LOW_INVENTORY). Los 5 evaluadores en fulfilled.
+- POST /api/alerts?evaluate=true (2da vez) → 200, evaluated=5, created=0, duplicates=5 (dedup correcto por type+entity).
+- POST /api/alerts/{id}/resolve → 200, resolved=true, resolvedAt set.
+- POST /api/alerts/nonexistent/resolve → 404 "Alerta no encontrada".
+
+Worker auto-start verificado al cargar /dashboard:
+- [INFO] print-worker.started intervalMs=15000
+- [INFO] alert-worker.started intervalMs=300000
+- [INFO] alert.evaluateAll done evaluators=5 conditions=5 rejected=0
+- [INFO] alert-worker.tick done evaluated=5 created=0 duplicates=5 durationMs=14
+
+Lint: `bun run lint` global → exit 0 (0 errores en archivos propios ni en el resto del repo).
+
+Stage Summary:
+- Backend de IA Insights + Alerts COMPLETO y verificado end-to-end.
+- 10 archivos nuevos + 1 editado. z-ai-web-dev-sdk aislado en ai.service.ts (única importación del SDK en todo el repo, backend only).
+- 4 tipos de insights funcionando con LLM real (predicción, anomalías, resumen mensual, análisis de productos) + fallback heurístico si el LLM falla o no hay datos suficientes.
+- 5 evaluadores de alertas corriendo en paralelo con Promise.allSettled + dedup por (type+entity) + emisión realtime vía emitAlert.
+- Worker periódico (5min) auto-arrancado al cargar el dashboard, con flag anti-reentrada y primer tick diferido 10s.
+- API REST completa con RBAC correcto (ADMIN/GERENCIA para generar insights y evaluar alertas, ADMIN/GERENCIA/SERVICIO para resolver alertas, fallback auth para lectura).
+
+---
+Task ID: RESTORE-3
+Agent: dashboard-pages-restorer
+Task: Restaurar 9 páginas de dashboard eliminadas en force push
+
+Work Log:
+- Leí worklog.md y exploré la estructura del proyecto: App Router, layout con DashboardShell, AppShell con sidebar de 4 secciones (Operación/Logística/Análisis/Configuración), TanStack Query, sonner toast, next-auth/react, recharts.
+- Reutilicé `KPICard`, `StatusBadge`, format helpers (formatCOP/formatDate/formatNumber/formatPercent) y shadcn/ui components existentes.
+- Verifiqué los endpoints API reales (que ya existen) y alineé los query params y shapes de respuesta:
+  - `/api/customers` usa `sortBy`/`sortDir` (no `sort`/`order`), y `stats=true` retorna `{ ...list, stats }` combinado con `byClassification` en vez de campos individuales.
+  - `/api/analytics/products` usa `view=star|stats|ranking` y devuelve `topByQuantity/topByRevenue/topByProfit` (arrays), `totalProducts/activeProducts/totalUnitsSold` y `costTotal` (no `cost`).
+  - `/api/analytics/returns` usa `view=metrics|list` y devuelve `topProducts/topCities` con `{ id, label, count, lostValue }`.
+  - `/api/analytics/profitability` usa `view=period|trend|breakdown&period=&days=` y devuelve `transportCollected` (no `transportCharged`).
+  - `/api/alerts` retorna `{ alerts, total, stats }` combinado en una sola response.
+  - `/api/admin/users?stats=true` retorna `{ users, total, stats }` combinado; UserStats tiene `recentLogins24h` (no `lastLoginAt`).
+  - `/api/audit?stats=true` retorna `{ logs, total, stats }` combinado; AuditStats tiene `recent24h/recent7d/byAction/byEntity` (no `today/last24h/last7d/topActions/topEntities`); metadata ya viene parseada como objeto.
+  - `/api/ai/insights` retorna `{ insights, total, stats }` combinado; cada insight tiene `aiGenerated` boolean top-level (no en metadata).
+
+Páginas creadas (todas 'use client'):
+1. `dashboard/clientes/page.tsx` — 5 KPIs (Total, VIP, Frecuentes, Ticket promedio, Nuevos), filtros (search, classification, sortBy, sortDir), tabla con badges por clasificación (VIP=amber, FRECUENTE=emerald, NUEVO=zinc, INACTIVO=rose), Sheet de detalle con contacto + 4 mini-stats + historial de pedidos, paginación.
+2. `dashboard/productos/page.tsx` — 5 KPIs (Total, Activos, Unidades, Ingresos, Margen), 3 StarCards (emerald/teal/violet), ranking table sortable con MarginBadge (emerald≥30%, zinc 10-30%, rose<10%), search + paginación.
+3. `dashboard/devoluciones/page.tsx` — 4 KPIs, 2 bar charts horizontales (top productos rose, top ciudades amber), tabla con badges de estado (RECEIVED=zinc, INSPECTED=amber, RESTOCKED=emerald, DISCARDED=rose), paginación.
+4. `dashboard/finanzas/page.tsx` — period selector (Hoy/Semana/Mes/Año/Todo), 5 KPIs (Ingresos, Utilidad bruta, Utilidad neta, Margen, Transporte cobrado), trend chart 30 días (revenue emerald/costs/profit violet), donut chart de costos por categoría, income statement card.
+5. `dashboard/inteligencia-ia/page.tsx` — 4 KPIs (Total, Generados IA, Fallback, Última generación), 4 generation cards (Predicción emerald, Anomalías amber, Resumen teal, Productos violet) con botón Generar + loading state, lista colapsable con react-markdown y badges (type + "Generado por IA"/Fallback).
+6. `dashboard/alertas/page.tsx` — 4 KPIs (Total, Activas, Críticas, Resueltas), filtros (search, type, severity), switch auto-refresh 10s, alert cards con severity icon (CRITICAL=rose, WARNING=amber, INFO=teal), type badges (COD_UNPAID=amber, GUIDE_ERROR=rose, HIGH_RETURN=violet, LOW_INVENTORY=teal, SALES_DROP=zinc), botón Resolver con mutation.
+7. `dashboard/usuarios/page.tsx` — access control (si no ADMIN → card "Acceso denegado" con ShieldAlert), 4 KPIs, tabla con avatar+name+"Tú" badge para self-row, role badges (ADMIN=amber, GERENCIA=emerald, BODEGA=teal, SERVICIO=zinc), estado activo/inactivo, Dialog crear/editar con validación, AlertDialog eliminar (disabled en self-row), último login computado del listado.
+8. `dashboard/auditoria/page.tsx` — 4 KPIs (Total, Últimas 24h, Últimos 7 días, Top usuarios), 2 bar charts (acciones teal, entidades violet), filtros (search, action, entity, date range), tabla colapsable con metadata JSON expandido.
+9. `dashboard/documentacion/page.tsx` — Tabs "Manual de Usuario" (9 secciones: Introducción, Roles, Navegación, Pedidos, COD, Dashboard, IA, Alertas, FAQ) y "Manual Técnico" (11 secciones: Arquitectura, Stack, Modelos, FSM, Integraciones, Webhooks, Realtime, Seguridad, Workers, Limitaciones, Comandos), cada sección colapsable con icono y contenido rico.
+
+Stage Summary:
+- 9 páginas 'use client' creadas y alineadas con los endpoints API reales (no los del spec, que usaban `?stats=true`/`?star=true`/`?metrics=true`/`?trend=true&breakdown=true`; los reales usan `?view=` y respuestas combinadas).
+- `bun run lint` pasa sin errores. `tsc --noEmit --skipLibCheck` no reporta errores en los 9 archivos nuevos (sí en archivos existentes que no son de este task).
+- Sin colores indigo/azul. Badges y charts usan paleta amber/emerald/teal/violet/rose/zinc.
+- Responsive: mobile-first con grids que colapsan, tablas con overflow-x-auto, headers ocultos en breakpoints.
+- Componentes reutilizados: KPICard, StatusBadge, format helpers, todos los shadcn/ui (Card, Table, Badge, Button, Input, Select, Sheet, Dialog, AlertDialog, Tabs, Collapsible, Switch, Skeleton, Separator, ScrollArea, Progress, Avatar).
+- Charts con recharts (AreaChart, BarChart, PieChart) usando CSS vars (--chart-1..5) y tooltips custom en español.

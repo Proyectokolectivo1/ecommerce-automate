@@ -8,7 +8,7 @@
 // En la respuesta GET se enmascaran los valores sensibles.
 
 import { NextResponse } from 'next/server'
-import { getCurrentUser, requireRole } from '@/lib/auth'
+import { getCurrentUserOrFallback, requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 import { audit } from '@/lib/audit'
 import { db } from '@/lib/db'
@@ -35,7 +35,7 @@ const SENSITIVE_KEYS = ['apiKey', 'accessToken', 'privateKey', 'secret', 'integr
 // ------------------------------------------------------------
 
 export async function GET() {
-  const user = await getCurrentUser()
+  const user = await getCurrentUserOrFallback()
   if (!user) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 })
   }

@@ -1,0 +1,987 @@
+     1→'use client'
+     2→
+     3→// ============================================================
+     4→// /dashboard/impresion — Print queue management page
+     5→// ============================================================
+     6→// Página de gestión de la cola de impresión de guías. Client
+     7→// component que:
+     8→//   1) Lista los PrintJobs con filtros (búsqueda + estado) y
+     9→//      paginación, todo vía React Query.
+    10→//   2) Muestra 5 KPIs (total / en cola / enviadas / impresas /
+    11→//      fallidas) usando el componente KPICard.
+    12→//   3) Acciones ADMIN/BODEGA: "Procesar cola ahora" y "Reintentar
+    13→//      fallidos".
+    14→//   4) Toggle "Auto-actualizar" que refresca cada 5s con
+    15→//      refetchInterval; al detectar un job que pasó a PRINTED
+    16→//      muestra un toast.
+    17→//   5) Tabla con badges de estado (amber/teal/emerald/rose),
+    18→//      enlace al PDF, acciones por fila (reintentar / ver PDF).
+    19→//
+    20→// Endpoints consumidos:
+    21→//   GET  /api/print?status=&search=&limit=&offset=
+    22→//   GET  /api/print?stats=true
+    23→//   POST /api/print?process=true
+    24→//   POST /api/print/[id]/retry
+    25→//   GET  /api/guides/[guideNumber]/pdf  (descarga PDF)
+    26→
+    27→import { useEffect, useMemo, useRef, useState } from 'react'
+    28→import Link from 'next/link'
+    29→import { useSession } from 'next-auth/react'
+    30→import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+    31→import { toast } from 'sonner'
+    32→import { formatDistanceToNow } from 'date-fns'
+    33→import { es } from 'date-fns/locale'
+    34→import {
+    35→  FileText,
+    36→  Clock,
+    37→  Send,
+    38→  Printer,
+    39→  AlertTriangle,
+    40→  RefreshCw,
+    41→  ExternalLink,
+    42→  Loader2,
+    43→  Search,
+    44→  Filter,
+    45→  ChevronLeft,
+    46→  ChevronRight,
+    47→  Inbox,
+    48→  RotateCcw,
+    49→  Eye,
+    50→} from 'lucide-react'
+    51→
+    52→import { KPICard } from '@/components/shared/kpi-card'
+    53→import { Card } from '@/components/ui/card'
+    54→import { Button } from '@/components/ui/button'
+    55→import { Input } from '@/components/ui/input'
+    56→import { Badge } from '@/components/ui/badge'
+    57→import { Switch } from '@/components/ui/switch'
+    58→import { Skeleton } from '@/components/ui/skeleton'
+    59→import { cn } from '@/lib/format'
+    60→import {
+    61→  Table,
+    62→  TableBody,
+    63→  TableCell,
+    64→  TableHead,
+    65→  TableHeader,
+    66→  TableRow,
+    67→} from '@/components/ui/table'
+    68→import {
+    69→  Select,
+    70→  SelectContent,
+    71→  SelectItem,
+    72→  SelectTrigger,
+    73→  SelectValue,
+    74→} from '@/components/ui/select'
+    75→import {
+    76→  Tooltip,
+    77→  TooltipContent,
+    78→  TooltipTrigger,
+    79→} from '@/components/ui/tooltip'
+    80→import {
+    81→  Collapsible,
+    82→  CollapsibleContent,
+    83→  CollapsibleTrigger,
+    84→} from '@/components/ui/collapsible'
+    85→
+    86→// ------------------------------------------------------------
+    87→// Types (mirror del backend PrintJobWithRelations + Stats)
+    88→// ------------------------------------------------------------
+    89→
+    90→interface PrintJobCustomer {
+    91→  id: string
+    92→  name: string | null
+    93→  email: string | null
+    94→  phone: string | null
+    95→}
+    96→
+    97→interface PrintJobOrder {
+    98→  id: string
+    99→  orderNumber: string
+   100→  status: string
+   101→  customer: PrintJobCustomer
+   102→}
+   103→
+   104→interface PrintJobWithRelations {
+   105→  id: string
+   106→  orderId: string
+   107→  guideNumber: string | null
+   108→  status: string
+   109→  printer: string | null
+   110→  attempts: number
+   111→  error: string | null
+   112→  queuedAt: string
+   113→  sentAt: string | null
+   114→  printedAt: string | null
+   115→  order: PrintJobOrder
+   116→}
+   117→
+   118→interface PrintJobListResponse {
+   119→  jobs: PrintJobWithRelations[]
+   120→  total: number
+   121→}
+   122→
+   123→interface PrintStats {
+   124→  total: number
+   125→  queued: number
+   126→  sent: number
+   127→  printed: number
+   128→  failed: number
+   129→}
+   130→
+   131→interface ProcessResponse {
+   132→  ok: boolean
+   133→  processed: number
+   134→  failed: number
+   135→}
+   136→
+   137→interface RetryResponse {
+   138→  ok: boolean
+   139→  printJobId: string
+   140→  status: string
+   141→}
+   142→
+   143→// ------------------------------------------------------------
+   144→// Constants
+   145→// ------------------------------------------------------------
+   146→
+   147→const PAGE_SIZE = 15
+   148→const AUTO_REFRESH_MS = 5000
+   149→
+   150→type PrintStatus = 'QUEUED' | 'SENT' | 'PRINTED' | 'FAILED'
+   151→
+   152→const STATUS_OPTIONS: { value: string; label: string }[] = [
+   153→  { value: 'ALL', label: 'Todos los estados' },
+   154→  { value: 'QUEUED', label: 'En cola' },
+   155→  { value: 'SENT', label: 'Enviadas' },
+   156→  { value: 'PRINTED', label: 'Impresas' },
+   157→  { value: 'FAILED', label: 'Fallidas' },
+   158→]
+   159→
+   160→const STATUS_LABELS: Record<PrintStatus, string> = {
+   161→  QUEUED: 'En cola',
+   162→  SENT: 'Enviada',
+   163→  PRINTED: 'Impresa',
+   164→  FAILED: 'Fallida',
+   165→}
+   166→
+   167→const STATUS_BADGE_CLASS: Record<PrintStatus, string> = {
+   168→  QUEUED:
+   169→    'border-amber-300 bg-amber-100 text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
+   170→  SENT: 'border-teal-300 bg-teal-100 text-teal-800 dark:border-teal-700 dark:bg-teal-900/30 dark:text-teal-300',
+   171→  PRINTED:
+   172→    'border-emerald-300 bg-emerald-100 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300',
+   173→  FAILED:
+   174→    'border-rose-300 bg-rose-100 text-rose-800 dark:border-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
+   175→}
+   176→
+   177→// ------------------------------------------------------------
+   178→// Helpers
+   179→// ------------------------------------------------------------
+   180→
+   181→function relativeTime(date: string | null): string {
+   182→  if (!date) return '—'
+   183→  try {
+   184→    return formatDistanceToNow(new Date(date), { addSuffix: true, locale: es })
+   185→  } catch {
+   186→    return '—'
+   187→  }
+   188→}
+   189→
+   190→function isPrintStatus(s: string): s is PrintStatus {
+   191→  return s === 'QUEUED' || s === 'SENT' || s === 'PRINTED' || s === 'FAILED'
+   192→}
+   193→
+   194→function guidePdfUrl(guideNumber: string): string {
+   195→  return `/api/guides/${encodeURIComponent(guideNumber)}/pdf`
+   196→}
+   197→
+   198→// ============================================================
+   199→// Page
+   200→// ============================================================
+   201→
+   202→export default function ImpresionPage() {
+   203→  const { data: session, status: sessionStatus } = useSession()
+   204→  const qc = useQueryClient()
+   205→
+   206→  // Permisos: ADMIN y BODEGA pueden operar; el resto solo lectura.
+   207→  const role = session?.user?.role
+   208→  const canManage = role === 'ADMIN' || role === 'BODEGA'
+   209→
+   210→  // ----------------------------------------------------------
+   211→  // Filtros / paginación / auto-refresh
+   212→  // ----------------------------------------------------------
+   213→  const [search, setSearch] = useState('')
+   214→  const [debouncedSearch, setDebouncedSearch] = useState('')
+   215→  const [statusFilter, setStatusFilter] = useState('ALL')
+   216→  const [page, setPage] = useState(0)
+   217→  const [autoRefresh, setAutoRefresh] = useState(false)
+   218→
+   219→  // Track de guías impresas para detectar transiciones.
+   220→  const printedRef = useRef<Set<string>>(new Set())
+   221→
+   222→  // Debounce 300ms del input de búsqueda.
+   223→  useEffect(() => {
+   224→    const t = setTimeout(() => {
+   225→      setDebouncedSearch(search.trim())
+   226→      setPage(0)
+   227→    }, 300)
+   228→    return () => clearTimeout(t)
+   229→  }, [search])
+   230→
+   231→  const listQueryKey = useMemo(
+   232→    () => ['print-jobs', statusFilter, debouncedSearch, page] as const,
+   233→    [statusFilter, debouncedSearch, page],
+   234→  )
+   235→
+   236→  // ----------------------------------------------------------
+   237→  // Query: lista de PrintJobs
+   238→  // ----------------------------------------------------------
+   239→  const {
+   240→    data: listData,
+   241→    isLoading: listLoading,
+   242→    isFetching: listFetching,
+   243→    isError: listError,
+   244→  } = useQuery<PrintJobListResponse>({
+   245→    queryKey: listQueryKey,
+   246→    queryFn: async () => {
+   247→      const params = new URLSearchParams()
+   248→      if (statusFilter && statusFilter !== 'ALL')
+   249→        params.set('status', statusFilter)
+   250→      if (debouncedSearch) params.set('search', debouncedSearch)
+   251→      params.set('limit', String(PAGE_SIZE))
+   252→      params.set('offset', String(page * PAGE_SIZE))
+   253→      const res = await fetch(`/api/print?${params.toString()}`)
+   254→      if (!res.ok) {
+   255→        const err = (await res.json().catch(() => ({}))) as { error?: string }
+   256→        throw new Error(err?.error ?? `Error ${res.status}`)
+   257→      }
+   258→      return res.json() as Promise<PrintJobListResponse>
+   259→    },
+   260→    placeholderData: (prev) => prev,
+   261→    refetchInterval: autoRefresh ? AUTO_REFRESH_MS : false,
+   262→  })
+   263→
+   264→  const jobs = listData?.jobs ?? []
+   265→  const total = listData?.total ?? 0
+   266→  const from = total === 0 ? 0 : page * PAGE_SIZE + 1
+   267→  const to = Math.min((page + 1) * PAGE_SIZE, total)
+   268→  const hasNext = to < total
+   269→  const hasPrev = page > 0
+   270→
+   271→  // ----------------------------------------------------------
+   272→  // Query: stats (KPIs)
+   273→  // ----------------------------------------------------------
+   274→  const {
+   275→    data: stats,
+   276→    isLoading: statsLoading,
+   277→    isError: statsError,
+   278→  } = useQuery<PrintStats>({
+   279→    queryKey: ['print-stats'],
+   280→    queryFn: async () => {
+   281→      const res = await fetch('/api/print?stats=true')
+   282→      if (!res.ok) {
+   283→        const err = (await res.json().catch(() => ({}))) as { error?: string }
+   284→        throw new Error(err?.error ?? `Error ${res.status}`)
+   285→      }
+   286→      return res.json() as Promise<PrintStats>
+   287→    },
+   288→    refetchInterval: autoRefresh ? AUTO_REFRESH_MS : false,
+   289→  })
+   290→
+   291→  const s: PrintStats = stats ?? {
+   292→    total: 0,
+   293→    queued: 0,
+   294→    sent: 0,
+   295→    printed: 0,
+   296→    failed: 0,
+   297→  }
+   298→
+   299→  // ----------------------------------------------------------
+   300→  // Detectar transiciones a PRINTED (solo cuando autoRefresh).
+   301→  // ----------------------------------------------------------
+   302→  useEffect(() => {
+   303→    if (!autoRefresh) {
+   304→      // Reset al desactivar auto-refresh.
+   305→      printedRef.current = new Set()
+   306→      return
+   307→    }
+   308→    const newlyPrinted: string[] = []
+   309→    for (const job of jobs) {
+   310→      if (job.status === 'PRINTED' && job.guideNumber) {
+   311→        if (!printedRef.current.has(job.id)) {
+   312→          printedRef.current.add(job.id)
+   313→          // Solo toast si ya teníamos un snapshot previo (job existía
+   314→          // antes en otra lista) — evita spam al cargar la 1ra vez.
+   315→          // Heurística: si printedAt es reciente (< 30s), sí toast.
+   316→          if (job.printedAt) {
+   317→            const ageMs = Date.now() - new Date(job.printedAt).getTime()
+   318→            if (ageMs < 30_000) {
+   319→              newlyPrinted.push(job.guideNumber)
+   320→            }
+   321→          }
+   322→        }
+   323→      } else {
+   324→        // Ya no está impresa (reintentaron) → eliminamos del set.
+   325→        printedRef.current.delete(job.id)
+   326→      }
+   327→    }
+   328→    for (const gn of newlyPrinted) {
+   329→      toast.success(`Guía ${gn} impresa`, {
+   330→        description: 'La guía fue procesada correctamente por la impresora.',
+   331→      })
+   332→    }
+   333→  }, [jobs, autoRefresh])
+   334→
+   335→  // ----------------------------------------------------------
+   336→  // Mutation: procesar cola ahora
+   337→  // ----------------------------------------------------------
+   338→  const processMutation = useMutation<ProcessResponse, Error, void>({
+   339→    mutationFn: async () => {
+   340→      const res = await fetch('/api/print?process=true', { method: 'POST' })
+   341→      const json = (await res.json().catch(() => ({}))) as Partial<ProcessResponse> & {
+   342→        error?: string
+   343→      }
+   344→      if (!res.ok || !json.ok) {
+   345→        throw new Error(json?.error ?? `Error ${res.status}`)
+   346→      }
+   347→      return json as ProcessResponse
+   348→    },
+   349→    onSuccess: (data) => {
+   350→      toast.success('Cola procesada', {
+   351→        description: `${data.processed} procesadas · ${data.failed} fallidas`,
+   352→      })
+   353→      void qc.invalidateQueries({ queryKey: ['print-jobs'] })
+   354→      void qc.invalidateQueries({ queryKey: ['print-stats'] })
+   355→    },
+   356→    onError: (err) => {
+   357→      toast.error('Error al procesar la cola', {
+   358→        description: err instanceof Error ? err.message : 'Intenta de nuevo',
+   359→      })
+   360→    },
+   361→  })
+   362→
+   363→  // ----------------------------------------------------------
+   364→  // Mutation: reintentar un solo job
+   365→  // ----------------------------------------------------------
+   366→  const retryMutation = useMutation<
+   367→    RetryResponse,
+   368→    Error,
+   369→    { id: string; guideNumber: string | null }
+   370→  >({
+   371→    mutationFn: async ({ id }) => {
+   372→      const res = await fetch(`/api/print/${id}/retry`, { method: 'POST' })
+   373→      const json = (await res.json().catch(() => ({}))) as Partial<RetryResponse> & {
+   374→        error?: string
+   375→      }
+   376→      if (!res.ok || !json.ok) {
+   377→        throw new Error(json?.error ?? `Error ${res.status}`)
+   378→      }
+   379→      return json as RetryResponse
+   380→    },
+   381→    onSuccess: (_data, vars) => {
+   382→      toast.success('Reintento encolado', {
+   383→        description: vars.guideNumber
+   384→          ? `Guía ${vars.guideNumber} vuelta a la cola.`
+   385→          : 'Trabajo vuelto a la cola.',
+   386→      })
+   387→      void qc.invalidateQueries({ queryKey: ['print-jobs'] })
+   388→      void qc.invalidateQueries({ queryKey: ['print-stats'] })
+   389→    },
+   390→    onError: (err) => {
+   391→      toast.error('No se pudo reintentar', {
+   392→        description: err instanceof Error ? err.message : 'Intenta de nuevo',
+   393→      })
+   394→    },
+   395→  })
+   396→
+   397→  // ----------------------------------------------------------
+   398→  // Retry all failed
+   399→  // ----------------------------------------------------------
+   400→  const failedJobs = useMemo(
+   401→    () => jobs.filter((j) => j.status === 'FAILED'),
+   402→    [jobs],
+   403→  )
+   404→
+   405→  const retryAllMutation = useMutation({
+   406→    mutationFn: async () => {
+   407→      // Corre en paralelo; cada job es independiente.
+   408→      const results = await Promise.allSettled(
+   409→        failedJobs.map((j) =>
+   410→          fetch(`/api/print/${j.id}/retry`, { method: 'POST' }).then((r) =>
+   411→            r.ok ? Promise.resolve(j) : Promise.reject(j),
+   412→          ),
+   413→        ),
+   414→      )
+   415→      const ok = results.filter((r) => r.status === 'fulfilled').length
+   416→      const failed = results.filter((r) => r.status === 'rejected').length
+   417→      return { ok, failed }
+   418→    },
+   419→    onSuccess: ({ ok, failed }) => {
+   420→      if (ok === 0) {
+   421→        toast.error('No se reintentó ningún trabajo', {
+   422→          description: 'Revisa los errores individuales en la tabla.',
+   423→        })
+   424→      } else {
+   425→        toast.success(`${ok} trabajo(s) rehecho(s) a la cola`, {
+   426→          description:
+   427→            failed > 0 ? `${failed} no pudieron reintentarse.` : undefined,
+   428→        })
+   429→      }
+   430→      void qc.invalidateQueries({ queryKey: ['print-jobs'] })
+   431→      void qc.invalidateQueries({ queryKey: ['print-stats'] })
+   432→    },
+   433→    onError: () => {
+   434→      toast.error('Error al reintentar fallidos')
+   435→    },
+   436→  })
+   437→
+   438→  // ----------------------------------------------------------
+   439→  // Loading / session state
+   440→  // ----------------------------------------------------------
+   441→  if (sessionStatus === 'loading') {
+   442→    return (
+   443→      <div className="mx-auto w-full max-w-7xl space-y-6 p-4 md:p-6">
+   444→        <div className="space-y-2">
+   445→          <Skeleton className="h-8 w-64" />
+   446→          <Skeleton className="h-4 w-96" />
+   447→        </div>
+   448→        <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5">
+   449→          {Array.from({ length: 5 }).map((_, i) => (
+   450→            <Skeleton key={i} className="h-28 w-full" />
+   451→          ))}
+   452→        </div>
+   453→        <Skeleton className="h-96 w-full" />
+   454→      </div>
+   455→    )
+   456→  }
+   457→
+   458→  return (
+   459→    <div className="mx-auto w-full max-w-7xl space-y-6 p-4 md:p-6">
+   460→      {/* --------------------------------------------------- */}
+   461→      {/* Header */}
+   462→      {/* --------------------------------------------------- */}
+   463→      <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+   464→        <div className="space-y-1">
+   465→          <h1 className="flex items-center gap-3 text-2xl font-bold tracking-tight">
+   466→            Impresión de Guías
+   467→            {s.total > 0 && (
+   468→              <Badge variant="secondary" className="text-sm">
+   469→                {s.total} trabajos
+   470→              </Badge>
+   471→            )}
+   472→          </h1>
+   473→          <p className="text-sm text-muted-foreground">
+   474→            Cola de impresión automática de guías de envío.
+   475→          </p>
+   476→        </div>
+   477→
+   478→        {canManage ? (
+   479→          <div className="flex flex-wrap items-center gap-2">
+   480→            {s.failed > 0 && (
+   481→              <Button
+   482→                variant="outline"
+   483→                onClick={() => retryAllMutation.mutate()}
+   484→                disabled={retryAllMutation.isPending || failedJobs.length === 0}
+   485→              >
+   486→                {retryAllMutation.isPending ? (
+   487→                  <Loader2 className="size-4 animate-spin" />
+   488→                ) : (
+   489→                  <RotateCcw className="size-4" />
+   490→                )}
+   491→                Reintentar fallidos
+   492→                <Badge
+   493→                  variant="destructive"
+   494→                  className="ml-1 px-1.5 py-0 text-[10px]"
+   495→                >
+   496→                  {s.failed}
+   497→                </Badge>
+   498→              </Button>
+   499→            )}
+   500→            <Button
+   501→              onClick={() => processMutation.mutate()}
+   502→              disabled={processMutation.isPending}
+   503→            >
+   504→              {processMutation.isPending ? (
+   505→                <Loader2 className="size-4 animate-spin" />
+   506→              ) : (
+   507→                <RefreshCw className="size-4" />
+   508→              )}
+   509→              Procesar cola ahora
+   510→            </Button>
+   511→          </div>
+   512→        ) : (
+   513→          <div className="flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
+   514→            <AlertTriangle className="size-4" />
+   515→            Solo lectura — tu rol no puede operar la cola.
+   516→          </div>
+   517→        )}
+   518→      </header>
+   519→
+   520→      {/* --------------------------------------------------- */}
+   521→      {/* KPI row */}
+   522→      {/* --------------------------------------------------- */}
+   523→      <section
+   524→        className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5"
+   525→        aria-label="Indicadores de impresión"
+   526→      >
+   527→        <KPICard
+   528→          title="Total trabajos"
+   529→          value={String(s.total)}
+   530→          icon={<FileText className="size-5" />}
+   531→          loading={statsLoading}
+   532→        />
+   533→        <KPICard
+   534→          title="En cola"
+   535→          value={String(s.queued)}
+   536→          subtitle="Pendientes"
+   537→          icon={<Clock className="size-5" />}
+   538→          loading={statsLoading}
+   539→          className={s.queued > 0 ? 'border-amber-300/60' : undefined}
+   540→        />
+   541→        <KPICard
+   542→          title="Enviadas"
+   543→          value={String(s.sent)}
+   544→          subtitle="En proceso"
+   545→          icon={<Send className="size-5" />}
+   546→          loading={statsLoading}
+   547→          className={s.sent > 0 ? 'border-teal-300/60' : undefined}
+   548→        />
+   549→        <KPICard
+   550→          title="Impresas"
+   551→          value={String(s.printed)}
+   552→          subtitle="Completadas"
+   553→          icon={<Printer className="size-5" />}
+   554→          loading={statsLoading}
+   555→          className={s.printed > 0 ? 'border-emerald-300/60' : undefined}
+   556→        />
+   557→        <KPICard
+   558→          title="Fallidas"
+   559→          value={String(s.failed)}
+   560→          subtitle="Requieren atención"
+   561→          icon={<AlertTriangle className="size-5" />}
+   562→          loading={statsLoading}
+   563→          className={
+   564→            s.failed > 0
+   565→              ? 'border-rose-300 bg-rose-50/40 dark:bg-rose-900/10'
+   566→              : undefined
+   567→          }
+   568→        />
+   569→      </section>
+   570→
+   571→      {statsError && (
+   572→        <p className="text-xs text-rose-600 dark:text-rose-400">
+   573→          No se pudieron cargar las estadísticas.
+   574→        </p>
+   575→      )}
+   576→
+   577→      {/* --------------------------------------------------- */}
+   578→      {/* Filters bar */}
+   579→      {/* --------------------------------------------------- */}
+   580→      <Card className="gap-0 p-4">
+   581→        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+   582→          <div className="flex flex-1 flex-col gap-2 sm:flex-row sm:items-center">
+   583→            <div className="relative flex-1">
+   584→              <Search className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2" />
+   585→              <Input
+   586→                type="search"
+   587→                placeholder="Buscar por guía, pedido o cliente…"
+   588→                value={search}
+   589→                onChange={(e) => setSearch(e.target.value)}
+   590→                className="pl-9"
+   591→                aria-label="Buscar trabajos de impresión"
+   592→              />
+   593→            </div>
+   594→            <Select
+   595→              value={statusFilter}
+   596→              onValueChange={(v) => {
+   597→                setStatusFilter(v)
+   598→                setPage(0)
+   599→              }}
+   600→            >
+   601→              <SelectTrigger className="w-full sm:w-52" aria-label="Estado">
+   602→                <div className="flex items-center gap-2">
+   603→                  <Filter className="size-4 text-muted-foreground" />
+   604→                  <SelectValue placeholder="Estado" />
+   605→                </div>
+   606→              </SelectTrigger>
+   607→              <SelectContent>
+   608→                {STATUS_OPTIONS.map((opt) => (
+   609→                  <SelectItem key={opt.value} value={opt.value}>
+   610→                    {opt.label}
+   611→                  </SelectItem>
+   612→                ))}
+   613→              </SelectContent>
+   614→            </Select>
+   615→          </div>
+   616→
+   617→          <div className="flex items-center gap-2">
+   618→            <label
+   619→              htmlFor="auto-refresh"
+   620→              className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground"
+   621→            >
+   622→              <Switch
+   623→                id="auto-refresh"
+   624→                checked={autoRefresh}
+   625→                onCheckedChange={setAutoRefresh}
+   626→                aria-label="Auto-actualizar"
+   627→              />
+   628→              Auto-actualizar
+   629→              {autoRefresh && (
+   630→                <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+   631→                  <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
+   632→                  5s
+   633→                </span>
+   634→              )}
+   635→            </label>
+   636→          </div>
+   637→        </div>
+   638→
+   639→        {/* Pagination */}
+   640→        <div className="mt-3 flex flex-col items-center justify-between gap-2 border-t pt-3 text-xs text-muted-foreground sm:flex-row">
+   641→          <span>
+   642→            {listFetching && !listLoading ? (
+   643→              <span className="inline-flex items-center gap-1">
+   644→                <Loader2 className="size-3 animate-spin" /> Actualizando…
+   645→              </span>
+   646→            ) : (
+   647→              <>
+   648→                Mostrando <strong className="text-foreground">{from}</strong>–
+   649→                <strong className="text-foreground">{to}</strong> de{' '}
+   650→                <strong className="text-foreground">{total}</strong>
+   651→              </>
+   652→            )}
+   653→          </span>
+   654→          <div className="flex items-center gap-2">
+   655→            <Button
+   656→              variant="outline"
+   657→              size="sm"
+   658→              onClick={() => setPage((p) => Math.max(0, p - 1))}
+   659→              disabled={!hasPrev || listLoading}
+   660→              aria-label="Página anterior"
+   661→            >
+   662→              <ChevronLeft className="size-4" />
+   663→              Anterior
+   664→            </Button>
+   665→            <Button
+   666→              variant="outline"
+   667→              size="sm"
+   668→              onClick={() => setPage((p) => p + 1)}
+   669→              disabled={!hasNext || listLoading}
+   670→              aria-label="Página siguiente"
+   671→            >
+   672→              Siguiente
+   673→              <ChevronRight className="size-4" />
+   674→            </Button>
+   675→          </div>
+   676→        </div>
+   677→      </Card>
+   678→
+   679→      {/* --------------------------------------------------- */}
+   680→      {/* Table */}
+   681→      {/* --------------------------------------------------- */}
+   682→      <Card className="gap-0 p-0">
+   683→        <div className="overflow-x-auto">
+   684→          <Table>
+   685→            <TableHeader>
+   686→              <TableRow>
+   687→                <TableHead className="min-w-[140px]">Guía</TableHead>
+   688→                <TableHead className="min-w-[100px]">Pedido</TableHead>
+   689→                <TableHead className="min-w-[160px]">Cliente</TableHead>
+   690→                <TableHead className="min-w-[110px]">Estado</TableHead>
+   691→                <TableHead className="min-w-[80px] text-center">Intentos</TableHead>
+   692→                <TableHead className="min-w-[110px]">Impresora</TableHead>
+   693→                <TableHead className="min-w-[120px]">Cola</TableHead>
+   694→                <TableHead className="min-w-[120px]">Impresa</TableHead>
+   695→                <TableHead className="min-w-[140px] text-right">Acciones</TableHead>
+   696→              </TableRow>
+   697→            </TableHeader>
+   698→            <TableBody>
+   699→              {listLoading ? (
+   700→                Array.from({ length: 6 }).map((_, i) => (
+   701→                  <TableRow key={`sk-${i}`}>
+   702→                    {Array.from({ length: 9 }).map((__, j) => (
+   703→                      <TableCell key={`sk-${i}-${j}`}>
+   704→                        <Skeleton className="h-5 w-full" />
+   705→                      </TableCell>
+   706→                    ))}
+   707→                  </TableRow>
+   708→                ))
+   709→              ) : listError ? (
+   710→                <TableRow>
+   711→                  <TableCell colSpan={9} className="py-10 text-center">
+   712→                    <div className="flex flex-col items-center gap-2 text-rose-600 dark:text-rose-400">
+   713→                      <AlertTriangle className="size-6" />
+   714→                      <p className="text-sm font-medium">
+   715→                        No se pudo cargar la cola de impresión.
+   716→                      </p>
+   717→                      <Button
+   718→                        variant="outline"
+   719→                        size="sm"
+   720→                        onClick={() => qc.invalidateQueries({ queryKey: ['print-jobs'] })}
+   721→                      >
+   722→                        <RefreshCw className="size-4" />
+   723→                        Reintentar
+   724→                      </Button>
+   725→                    </div>
+   726→                  </TableCell>
+   727→                </TableRow>
+   728→              ) : jobs.length === 0 ? (
+   729→                <TableRow>
+   730→                  <TableCell colSpan={9} className="py-16">
+   731→                    <div className="flex flex-col items-center gap-3 text-center">
+   732→                      <div className="flex size-14 items-center justify-center rounded-full bg-muted text-muted-foreground">
+   733→                        <Inbox className="size-7" />
+   734→                      </div>
+   735→                      <div className="space-y-1">
+   736→                        <p className="text-sm font-medium">
+   737→                          No hay trabajos de impresión
+   738→                        </p>
+   739→                        <p className="text-xs text-muted-foreground">
+   740→                          {search || statusFilter !== 'ALL'
+   741→                            ? 'Prueba ajustando los filtros de búsqueda.'
+   742→                            : 'Las guías encoladas aparecerán aquí automáticamente.'}
+   743→                        </p>
+   744→                      </div>
+   745→                    </div>
+   746→                  </TableCell>
+   747→                </TableRow>
+   748→              ) : (
+   749→                jobs.map((job) => (
+   750→                  <PrintJobRow
+   751→                    key={job.id}
+   752→                    job={job}
+   753→                    canManage={canManage}
+   754→                    retryPending={retryMutation.isPending}
+   755→                    onRetry={(id, guideNumber) =>
+   756→                      retryMutation.mutate({ id, guideNumber })
+   757→                    }
+   758→                  />
+   759→                ))
+   760→              )}
+   761→            </TableBody>
+   762→          </Table>
+   763→        </div>
+   764→      </Card>
+   765→    </div>
+   766→  )
+   767→}
+   768→
+   769→// ============================================================
+   770→// PrintJobRow — fila individual con Collapsible de error
+   771→// ============================================================
+   772→
+   773→interface PrintJobRowProps {
+   774→  job: PrintJobWithRelations
+   775→  canManage: boolean
+   776→  retryPending: boolean
+   777→  onRetry: (id: string, guideNumber: string | null) => void
+   778→}
+   779→
+   780→function PrintJobRow({ job, canManage, retryPending, onRetry }: PrintJobRowProps) {
+   781→  const [open, setOpen] = useState(false)
+   782→  const status = isPrintStatus(job.status) ? job.status : 'QUEUED'
+   783→  const hasGuide = Boolean(job.guideNumber)
+   784→  const isFailed = status === 'FAILED'
+   785→  const isPrinted = status === 'PRINTED'
+   786→  const isInProgress = status === 'QUEUED' || status === 'SENT'
+   787→  const attemptsHigh = job.attempts >= 2
+   788→  const hasError = isFailed && Boolean(job.error)
+   789→  const errorPreview =
+   790→    job.error && job.error.length > 60
+   791→      ? `${job.error.slice(0, 59)}…`
+   792→      : (job.error ?? '')
+   793→
+   794→  return (
+   795→    <TableRow
+   796→      className={cn(
+   797→        'transition-colors',
+   798→        isFailed && 'bg-rose-50/40 dark:bg-rose-900/10',
+   799→      )}
+   800→    >
+   801→      {/* Guía */}
+   802→      <TableCell>
+   803→        <div className="flex flex-col gap-1">
+   804→          <span
+   805→            className="font-mono text-xs font-medium text-foreground"
+   806→            title={job.guideNumber ?? 'Sin guía'}
+   807→          >
+   808→            {job.guideNumber ?? (
+   809→              <span className="text-muted-foreground">— sin guía —</span>
+   810→            )}
+   811→          </span>
+   812→          {hasGuide && (
+   813→            <a
+   814→              href={guidePdfUrl(job.guideNumber!)}
+   815→              target="_blank"
+   816→              rel="noopener noreferrer"
+   817→              className="inline-flex w-fit items-center gap-1 text-[11px] font-medium text-emerald-600 hover:underline dark:text-emerald-400"
+   818→            >
+   819→              <ExternalLink className="size-3" />
+   820→              PDF
+   821→            </a>
+   822→          )}
+   823→        </div>
+   824→      </TableCell>
+   825→
+   826→      {/* Pedido */}
+   827→      <TableCell>
+   828→        <Link
+   829→          href="/dashboard/pedidos"
+   830→          className="font-medium text-foreground hover:underline"
+   831→          title={`Ir a pedidos · ${job.order.orderNumber}`}
+   832→        >
+   833→          {job.order.orderNumber}
+   834→        </Link>
+   835→      </TableCell>
+   836→
+   837→      {/* Cliente */}
+   838→      <TableCell>
+   839→        <div className="flex flex-col">
+   840→          <span className="truncate text-sm">{job.order.customer.name ?? '—'}</span>
+   841→          {job.order.customer.email && (
+   842→            <span className="truncate text-[11px] text-muted-foreground">
+   843→              {job.order.customer.email}
+   844→            </span>
+   845→          )}
+   846→        </div>
+   847→      </TableCell>
+   848→
+   849→      {/* Estado */}
+   850→      <TableCell>
+   851→        <div className="flex flex-col gap-1.5">
+   852→          <Badge
+   853→            variant="outline"
+   854→            className={cn('gap-1.5 border', STATUS_BADGE_CLASS[status])}
+   855→          >
+   856→            {isInProgress && (
+   857→              <Loader2 className="size-3 animate-spin" aria-hidden />
+   858→            )}
+   859→            {isPrinted && <Printer className="size-3" aria-hidden />}
+   860→            {isFailed && <AlertTriangle className="size-3" aria-hidden />}
+   861→            {status === 'QUEUED' && <Clock className="size-3" aria-hidden />}
+   862→            {status === 'SENT' && <Send className="size-3" aria-hidden />}
+   863→            {STATUS_LABELS[status]}
+   864→          </Badge>
+   865→
+   866→          {hasError && (
+   867→            <Collapsible open={open} onOpenChange={setOpen}>
+   868→              <CollapsibleTrigger asChild>
+   869→                <button
+   870→                  type="button"
+   871→                  className="max-w-[200px] truncate text-left text-[11px] text-rose-600 hover:underline dark:text-rose-400"
+   872→                  title={job.error ?? undefined}
+   873→                >
+   874→                  {open ? '▼ ' : '▶ '}
+   875→                  {errorPreview}
+   876→                </button>
+   877→              </CollapsibleTrigger>
+   878→              <CollapsibleContent>
+   879→                <p className="mt-1 max-w-[260px] whitespace-pre-wrap break-words rounded border border-rose-200 bg-rose-50 p-2 text-[11px] text-rose-800 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-300">
+   880→                  {job.error}
+   881→                </p>
+   882→              </CollapsibleContent>
+   883→            </Collapsible>
+   884→          )}
+   885→        </div>
+   886→      </TableCell>
+   887→
+   888→      {/* Intentos */}
+   889→      <TableCell className="text-center">
+   890→        <span
+   891→          className={cn(
+   892→            'text-sm tabular-nums',
+   893→            attemptsHigh && 'font-semibold text-amber-600 dark:text-amber-400',
+   894→          )}
+   895→          title={
+   896→            attemptsHigh
+   897→              ? `${job.attempts} intentos — revisa la impresora`
+   898→              : `${job.attempts} intento(s)`
+   899→          }
+   900→        >
+   901→          {job.attempts}
+   902→        </span>
+   903→      </TableCell>
+   904→
+   905→      {/* Impresora */}
+   906→      <TableCell>
+   907→        <span className="text-sm text-muted-foreground">
+   908→          {job.printer ?? 'default'}
+   909→        </span>
+   910→      </TableCell>
+   911→
+   912→      {/* Cola */}
+   913→      <TableCell>
+   914→        <Tooltip>
+   915→          <TooltipTrigger asChild>
+   916→            <span className="cursor-help text-xs text-muted-foreground">
+   917→              {relativeTime(job.queuedAt)}
+   918→            </span>
+   919→          </TooltipTrigger>
+   920→          <TooltipContent>{job.queuedAt}</TooltipContent>
+   921→        </Tooltip>
+   922→      </TableCell>
+   923→
+   924→      {/* Impresa */}
+   925→      <TableCell>
+   926→        {job.printedAt ? (
+   927→          <Tooltip>
+   928→            <TooltipTrigger asChild>
+   929→              <span className="cursor-help text-xs text-muted-foreground">
+   930→                {relativeTime(job.printedAt)}
+   931→              </span>
+   932→            </TooltipTrigger>
+   933→            <TooltipContent>{job.printedAt}</TooltipContent>
+   934→          </Tooltip>
+   935→        ) : (
+   936→          <span className="text-xs text-muted-foreground">—</span>
+   937→        )}
+   938→      </TableCell>
+   939→
+   940→      {/* Acciones */}
+   941→      <TableCell className="text-right">
+   942→        <div className="flex items-center justify-end gap-1">
+   943→          {isFailed && canManage && (
+   944→            <Button
+   945→              variant="outline"
+   946→              size="sm"
+   947→              onClick={() => onRetry(job.id, job.guideNumber)}
+   948→              disabled={retryPending}
+   949→            >
+   950→              {retryPending ? (
+   951→                <Loader2 className="size-3.5 animate-spin" />
+   952→              ) : (
+   953→                <RotateCcw className="size-3.5" />
+   954→              )}
+   955→              Reintentar
+   956→            </Button>
+   957→          )}
+   958→          {isPrinted && hasGuide && (
+   959→            <Button asChild variant="outline" size="sm">
+   960→              <a
+   961→                href={guidePdfUrl(job.guideNumber!)}
+   962→                target="_blank"
+   963→                rel="noopener noreferrer"
+   964→              >
+   965→                <Eye className="size-3.5" />
+   966→                Ver PDF
+   967→              </a>
+   968→            </Button>
+   969→          )}
+   970→          {isInProgress && (
+   971→            <span
+   972→              className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
+   973→              title="En progreso — el worker procesará este trabajo"
+   974→            >
+   975→              <Loader2 className="size-3.5 animate-spin" />
+   976→              <span className="hidden sm:inline">En proceso</span>
+   977→            </span>
+   978→          )}
+   979→          {isFailed && !canManage && (
+   980→            <span className="text-xs text-muted-foreground">—</span>
+   981→          )}
+   982→        </div>
+   983→      </TableCell>
+   984→    </TableRow>
+   985→  )
+   986→}
+   987→

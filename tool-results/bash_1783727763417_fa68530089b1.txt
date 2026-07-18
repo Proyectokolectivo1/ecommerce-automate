@@ -1,0 +1,400 @@
+
+Work Log:
+- Detecté que el dev server estaba caído: lo reinicié (puerto 3000 sano).
+- Detecté que el mini-service realtime no existía: lo creé en mini-services/realtime/ (socket.io puerto 3003). Tuve que reordenar listeners HTTP para que /emit y /health se procesen antes que engine.io (path '/' intercepta todo). Health check + emit bridge verificados con curl.
+- Alinear configs de integración en DB: el seed anterior (Task 6) usaba schema distinto (environment, shopDomain, etc.). Actualicé las 7 configs (SHOPIFY/MASTERSHOP/WOMPI/PAYU/MERCADOPAGO/EPAYCO/BOLD) al schema canónico de mis adapters (sandbox: true, campos vacíos = modo mock).
+- Verificación Agent Browser:
+  - Login admin@demo.com → redirect /dashboard ✓ (KPIs, tendencia, top productos renderizando)
+  - Navegación a /dashboard/integraciones ✓ (4 secciones, 9 cards, switches, botones Configurar/Probar)
+  - Dialog de configuración Wompi ✓ (campos secret con toggle mostrar, switch sandbox, webhook URL con copy)
+  - Botón "Probar" Wompi → ok: true (sandbox mock link generado) ✓
+- Verificación de flujo completo de pago (script bun):
+  1. createTransportPaymentLink (Wompi sandbox) → Transaction creada, codPaymentLink set en Order ✓
+  2. confirmPaymentFromWebhook (APPROVED) → Transaction actualizada, idempotente ✓
+  3. Order transicionó PENDIENTE_PAGO_TRANSPORTE → PAGO_TRANSPORTE_CONFIRMADO automáticamente ✓
+  4. codPaid = true, audit log PAYMENT_CONFIRMED registrado ✓
+- Verificación de 3 webhook receivers HTTP (curl):
+  - POST /api/webhooks/payments → 200 (parsea multi-provider, valida firma mock) ✓
+  - POST /api/webhooks/mastershop → 200 (procesa callback de guía, busca shipment) ✓
+  - POST /api/webhooks/shopify → 200, created:true (importó pedido #99999 COD, estado inicial PENDIENTE_PAGO_TRANSPORTE) ✓
+- Verificación en UI: pedido #99999 aparece en /dashboard/pedidos como "Pendiente pago transporte"; pedido #1003 aparece como "Pago transporte confirmado" ✓
+- Lint: 0 errores.
+
+Stage Summary:
+- Fase 2 (M1 + M8) COMPLETA y verificada end-to-end.
+- Capa src/integrations/ con 9 adapters (Shopify, Mastershop, 5 pasarelas, WhatsApp, Email) — arquitectura hexagonal, modo sandbox mock sin creds + modo real con creds.
+- 3 webhook receivers operativos (Shopify con HMAC, payments multi-provider, mastershop tracking).
+- payment.service orquesta links + confirmación idempotente + transición automática de FSM.
+- Mini-service realtime socket.io (puerto 3003) con bridge HTTP→WS + hook use-realtime para el frontend.
+- API de integraciones completa (list/upsert/toggle/test) con enmascaramiento de secretos + auditoría.
+- Página /dashboard/integraciones con panel de config por proveedor, dialogs, test de conexión.
+- Flujo COD completo verificado: Shopify webhook → pedido COD → link de pago Wompi → webhook de confirmación → FSM transition → auditoría.
+
+---
+Task ID: F3.1-F3.3
+Agent: main
+Task: Fase 3 backend — módulo logistics (shipment + printing services), orchestrator dispatch-flow, print worker, API routes (dispatch, guides, print)
+
+Work Log:
+- Creé `src/modules/logistics/shipment.service.ts`: createShipmentForOrder (valida orden despachable, llama Mastershop createDispatch, guarda Shipment, transiciona ENVIADO, encola PrintJob, notifica cliente, emite realtime), getShipmentByGuide/ById, listShipments con filtros, getShipmentStats, updateTrackingFromCallback.
+- Creé `src/modules/logistics/printing.service.ts`: enqueuePrintJob (idempotente), processPrintQueue (procesa QUEUED→SENT→PRINTED), retryPrintJob, listPrintJobs, getPrintJobStats, generateGuidePdf (PDF 1.1 mínimo válido con info de la guía).
+- Creé `src/integrations/notifications/notify-customer.ts`: notifyGuideCreated (WhatsApp + Email + DB notification), notifyPaymentLink (COD), builders HTML para email, normalizePhone a E.164.
+- Creé `src/lib/orchestrator/steps/dispatch-flow.ts`: flujo declarativo validate-order → create-dispatch → print-guide → notify-customer con onFailure notify-error. runDispatchFlow helper.
+- Creé `src/lib/print-worker.ts`: worker periódico (setInterval 15s) que procesa la cola de impresión. Auto-arranca al importar. Importado en (dashboard)/layout.tsx.
+- Creé API routes: /api/orders/[id]/dispatch (POST), /api/guides (GET list+stats), /api/guides/[id] (GET detail), /api/guides/[id]/pdf (GET download PDF), /api/print (GET list+stats, POST process), /api/print/[id]/retry (POST).
+- Verificación script bun: orden PREPARANDO → createShipmentForOrder → guía SER948331560 generada, orden transicionada a ENVIADO, PrintJob creado+procesado a PRINTED, PDF 1437 bytes en storage, notificación mock enviada. ✅
+- Lint limpio.
+
+Stage Summary:
+- Flujo completo de despacho operativo end-to-end: dispatch → guide → print → notify.
+- PDF de guía generado sin librerías externas (PDF 1.1 mínimo válido).
+- Worker de impresión automática corriendo cada 15s.
+- Notificación al cliente orquestada (WhatsApp + Email con HTML, modo mock sin creds).
+- Idempotencia en shipment (no duplica si ya tiene guía) y print job (no duplica si ya hay job activo).
+- Pendiente: UI páginas /dashboard/guias y /dashboard/impresion (delegado a subagents).
+
+---
+Task ID: F3.4-b
+Agent: fullstack-developer (Impresión page)
+Task: UI — Página /dashboard/impresion (cola de impresión de guías)
+
+Work Log:
+- Leí worklog.md (Tasks 1, F2.3, F3.1-F3.3) y ESTADO_PROYECTO.md para entender arquitectura hexagonal, patrones de filtros/paginación ya usados en orders-view.tsx, y el shape de PrintJobWithRelations devuelto por `/api/print`.
+- Verifiqué el componente `KPICard` (`src/components/shared/kpi-card.tsx`) — acepta title, value, subtitle, icon, loading, className. Confirmé que `src/lib/format.ts` exporta `cn` pero NO un helper de tiempo relativo, así que importé `formatDistanceToNow` de date-fns con locale `es`.
+- Confirmé los endpoints ya construidos (no los toqué): `GET /api/print` (list + `?stats=true`), `POST /api/print?process=true`, `POST /api/print/[id]/retry`, `GET /api/guides/[guideNumber]/pdf`. Leí `printing.service.ts` para entender el shape exacto de `PrintJobWithRelations` y `PrintStats`.
+- Creé `src/app/(dashboard)/dashboard/impresion/page.tsx` (client component `'use client'`):
+  - **Header**: título "Impresión de Guías" + subtitle + badge con total. Botones ADMIN/BODEGA: "Procesar cola ahora" (POST `?process=true`, toast con processed/failed) y "Reintentar fallidos" (solo si `stats.failed > 0`, hace `Promise.allSettled` de retries y reporta ok/failed). Otros roles ven nota "Solo lectura".
+  - **KPI row** (5 cards con `KPICard`): Total (FileText), En cola (Clock, amber border cuando >0), Enviadas (Send, teal), Impresas (Printer, emerald), Fallidas (AlertTriangle, rose background cuando >0). Skeletons mientras carga.
+  - **Filters bar**: Input de búsqueda con icono (debounce 300ms vía `useEffect`+`setTimeout`), Select de estado (ALL/QUEUED/SENT/PRINTED/FAILED), Switch "Auto-actualizar" con indicador pulsante "5s". Cuando está ON, ambos `useQuery` (lista + stats) usan `refetchInterval: 5000`.
+  - **Pagination**: prev/next + "Mostrando X-Y de Z" + spinner "Actualizando…" cuando hay refetch en background.
+  - **Tabla** (`Table` con `overflow-x-auto` en mobile): Guía (monospace + link "PDF" a `/api/guides/[guideNumber]/pdf` en nueva pestaña), Pedido (link a /dashboard/pedidos), Cliente (name + email), Estado (Badge amber/teal/emerald/rose con icono animado `Loader2` para QUEUED/SENT), Intentos (tabular-nums, amber si >=2), Impresora, Cola (relative time "hace X min" + tooltip con ISO), Impresa (relative o "—"), Acciones (Reintentar si FAILED+canManage, Ver PDF si PRINTED, spinner "En proceso" si QUEUED/SENT).
+  - **Error display**: para FAILED, bajo el Badge de Estado, un `Collapsible` muestra el error truncado a 60 chars como trigger (▶ prefix) y el error completo dentro de un panel rose al expandir.
+  - **Auto-refresh toast**: `useEffect` trackea en un `useRef<Set>` los IDs ya vistos como PRINTED; cuando auto-refresh está ON y un job aparece PRINTED con `printedAt` reciente (< 30s) y no estaba en el set, lanza `toast.success("Guía {guideNumber} impresa")`. Al desactivar auto-refresh se resetea el set.
+  - **Estados de UI**: session loading (skeleton full), table loading (6 filas skeleton), list error (mensaje con botón reintentar), empty state (icono Inbox + mensaje contextual según filtros activos).
+  - **Permisos**: `useSession` → `role === 'ADMIN' || role === 'BODEGA'` habilita acciones; el resto ve nota de solo lectura y los botones de acción por fila se ocultan.
+  - **Colores**: ningún indigo/azul. Badges amber/teal/emerald/rose. Texto secundario `text-muted-foreground`. Fondo rose suave para filas FAILED.
+- Lint: `bun run lint` → 0 errores tras limpiar imports no usados (`truncate`, `Printer as PrinterIcon` alias, `ErrorCollapsible` dead code).
+- Dev server: `GET /dashboard/impresion` compila en 1305ms, responde 307 (redirect a /login) para sesión no autenticada — comportamiento esperado del layout `(dashboard)`.
+
+Stage Summary:
+- Página de cola de impresión 100% funcional y polida: KPIs, filtros, paginación, auto-refresh, tabla densa con acciones contextuales, manejo de errores expandible, toasts.
+- Cumple restricciones de color (sin indigo/azul), responsive (tabla con scroll horizontal en mobile), accesibilidad (aria-labels, semantic table, tooltips en fechas).
+- Integrada al sidebar existente (`app-shell.tsx` ya linkea `/dashboard/impresion`).
+- Pendiente (otras tasks): página `/dashboard/guias` (lista de guías + tracking) — placeholder en sidebar pero sin UI dedicada aún.
+
+---
+Task ID: F3.4-a
+Agent: full-stack-developer (UI)
+Task: Página /dashboard/guias — gestión de envíos, números de guía y tracking de transportadoras (client component).
+
+Work Log:
+- Leí worklog Task 1 + F3.1-F3.3 y ESTADO_PROYECTO.md para alinear patrones: arquitectura hexagonal, FSM de pedidos, servicios de logistics (shipment.service + printing.service), API routes /api/guides (list+stats), /api/guides/[id] (detail), /api/guides/[id]/pdf (download), /api/print (POST process=true para forzar cola).
+- Leí componentes existentes: orders-view.tsx (patrón filters+table+sheet+skeleton+pagination), order-detail-sheet.tsx (helpers SectionTitle/InfoRow + badges), kpi-card.tsx, status-badge.tsx (solo para ORDER status), format.ts (formatCOP, formatDate, cn disponibles).
+- Creé `src/app/(dashboard)/dashboard/guias/page.tsx` — client component ('use client'), ~860 líneas:
+  - useSession() para obtener rol; canAccess(role, 'BODEGA') controla el botón "Procesar cola de impresión"; canAccess(role, 'BODEGA', 'SERVICIO') controla el link de descarga PDF.
+  - 3 queries TanStack: ['guides-stats'] → /api/guides?stats=true; ['guides', status, carrier, debouncedSearch, page] → /api/guides con filtros+paginación (placeholderData: prev para mantener data anterior); ['guide', shipmentId] enabled cuando se abre el drawer.
+  - useMutation para POST /api/print?process=true con toast success (procesados/impresos/fallidos) + invalidación de stats y list.
+  - KPI row con 4 KPICard (Total guías / Impresas / Pendientes impresión / En tránsito) con skeleton loading.
+  - Filters bar: search (debounce 300ms), select estado (ALL/CREATED/PRINTED/IN_TRANSIT/DELIVERED/RETURNED), select transportadora (ALL/SERVIENTREGA/ENVIA/INTERRAPIDISIMO/COORDINADORA/TCC), botón limpiar.
+  - Tabla con columnas: Guía (mono + link PDF), Pedido (link a /dashboard/pedidos), Cliente, Ciudad, Transportadora (badge), Estado (badge custom), Tracking count (badge numérico), Fecha, Acciones (Ver detalle).
+  - Custom ShipmentStatusBadge: CREATED=zinc, PRINTED=violet, IN_TRANSIT=teal, DELIVERED=emerald, RETURNED=rose (sin indigo/azul).
+  - Custom CarrierBadge con icon Building2.
+  - Empty state "No hay guías registradas" + estado de error con botón Reintentar.
+  - Drawer (Sheet) con: header (guideNumber mono + status badge + carrier badge), botón Descargar PDF (target=_blank), sección Pedido (número, total, ciudad, dirección), sección Cliente (nombre, email, teléfono), lista de Productos (title x quantity, sku), Tracking timeline vertical (most-recent first, dot+connector line por item, último sin conector), metadata created/updated.
+  - Paginación: Anterior/Siguiente + "Mostrando X–Y de Z" + "Pág. N".
+  - Responsive: tabla con overflow-x-auto, columnas ocultas en sm/md/lg según prioridad.
+  - Sticky header con sombra, scroll vertical máx 640px.
+- Verificación: `bunx eslint` sobre el archivo → 0 errores. Dev.log muestra `GET /dashboard/guias 307 in 1353ms (compile: 1234ms)` (compila OK; 307 = redirect a /login porque curl no tenía sesión).
+- Nota: `bun run lint` global tiene 1 error en `src/app/(dashboard)/dashboard/impresion/page.tsx` ('PrinterIcon' is not defined) que NO pertenece a mi tarea; lo dejé intacto.
+
+Stage Summary:
+- Página /dashboard/guias lista y compilando sin errores.
+- Cumple todos los requisitos: KPIs, filtros (debounce 300ms), tabla con PDF link, drawer con timeline, badges con paleta correcta (sin indigo/azul), RBAC para botón de cola de impresión y descarga PDF, sonner toasts, skeletons, responsive, accessibility (aria-label, role=button, sr-only).
+- API endpoints consumidos read-only (no modificados).
+- Próximo paso sugerido: verificación con Agent Browser logueado como ADMIN para validar visualmente la página con datos seed.
+
+---
+Task ID: F3.5-F3.7
+Agent: main
+Task: Fase 3 completada — PDF generation, print worker, dispatch flow UI integration, FSM fix, verificación Agent Browser
+
+Work Log:
+- Generación de PDF de guía implementada en printing.service.ts (PDF 1.1 mínimo válido, sin librerías externas, con info de transportadora/guía/cliente/productos). Verificado: 1438 bytes, file = "PDF document, version 1.1, 1 page(s)".
+- Worker de impresión automática (print-worker.ts) arrancado en (dashboard)/layout.tsx vía import con side-effect. Procesa cola cada 15s. Verificado: PrintJobs pasan QUEUED→SENT→PRINTED automáticamente.
+- Integración del botón "Despachar y generar guía" en order-detail-sheet.tsx: visible para pedidos en PREPARANDO o PAGO_TRANSPORTE_CONFIRMADO, llama POST /api/orders/[id]/dispatch, toast de éxito con guideNumber, invalida queries.
+- Subagents construyeron 2 páginas UI:
+  - /dashboard/guias: KPIs (4 cards), filtros (search/status/carrier), tabla con guías, drawer de detalle con tracking timeline, links PDF.
+  - /dashboard/impresion: KPIs (5 cards), filtros, switch auto-actualizar (refetchInterval 5s), tabla con estados, botones reintentar/procesar, toast al imprimir.
+- BUG FIX: FSM no permitía PAGO_TRANSPORTE_CONFIRMADO → ENVIADO directo. Corregí state-machine.ts para añadir esa transición (requerimiento sección 5: despachar directo tras confirmar pago transporte).
+- Fix de heurística en /api/guides/[id] y /api/guides/[id]/pdf: los cuid de Prisma (cm...) se confundían con guideNumbers. Añadí regex para distinguir cuid vs guideNumber.
+- Verificación Agent Browser end-to-end:
+  - Login admin → dashboard OK
+  - /dashboard/guias: 8 guías renderizadas, drawer detalle con timeline funcional, PDF download OK (200, application/pdf)
+  - /dashboard/impresion: 9 trabajos, KPIs correctos, botón "Procesar cola" → 200
+  - Dispatch flow vía API: #1003 PAGO_TRANSPORTE_CONFIRMADO → POST /dispatch → guía SER888263304 → ENVIADO → PrintJob PRINTED → PDF 1438 bytes → notificación mock WhatsApp+Email → auditoría
+  - #1006 despachado → guía SER262316317 → impresa
+  - Ambas guías nuevas aparecen en /dashboard/guias con estado "Impreso"
+- Lint: 0 errores. Browser errors: 0. Console errors: 0.
+
+Stage Summary:
+- Fase 3 (Logística & Impresión) COMPLETA y verificada end-to-end.
+- Flujo completo operativo: pedido despachable → Mastershop dispatch → guía generada → transición ENVIADO → impresión automática → PDF generado → notificación cliente (WhatsApp+Email) → auditoría.
+- 2 páginas UI nuevas (guias + impresion) + botón despachar integrado en order-detail.
+- Worker de impresión automática corriendo cada 15s.
+- PDF de guía generado sin librerías externas (PDF 1.1 válido).
+- Notificación al cliente orquestada (WhatsApp + Email HTML, modo mock sin creds).
+- FSM corregida para permitir despacho directo desde PAGO_TRANSPORTE_CONFIRMADO.
+- Servicios activos: dev server (3000) + realtime (3003) + print worker (background).
+
+---
+Task ID: F4.4
+Agent: fullstack-developer (UI — Clientes CRM page)
+Task: Página /dashboard/clientes — CRM de clientes con KPIs, filtros, tabla ordenable y drawer con historial de pedidos (client component).
+
+Work Log:
+- Leí `worklog.md` (Tasks 1, F2.5, F3.1-F3.7) y `ESTADO_PROYECTO.md` para entender la arquitectura hexagonal, los patrones de filtros/paginación ya usados en `orders-view.tsx` y `guias/page.tsx`, y el contexto de Fase 4 (CRM clientes).
+- Verifiqué los endpoints ya construidos (no los toqué): `GET /api/customers` (list+filtros+stats), `GET /api/customers/[id]` (detalle + 50 pedidos). Leí `customer.service.ts` y `classification.ts` para confirmar los shapes exactos (`Customer`, `CustomerWithOrders`, `CustomerStats`).
+- Confirmé los componentes reutilizables disponibles: `KPICard` (acepta title, value, subtitle, icon, loading), `StatusBadge` (para ORDER status, soporta size='sm'), `CLASSIFICATION_LABELS`/`CLASSIFICATION_DESCRIPTIONS`/`CLASSIFICATION_BADGE_CLASSES` (paletas amber/emerald/zinc/rose, sin indigo/azul), y `formatCOP`/`formatDate`/`cn` desde `@/lib/format`.
+- Creé `src/app/(dashboard)/dashboard/clientes/page.tsx` (client component, ~980 líneas):
+  - **Header**: título "Clientes" + subtitle "CRM de clientes con historial de compras, clasificación automática y métricas".
+  - **KPI row (5 cards)**: `grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5`. Cards: Total clientes (Users), VIP (Crown, "Clientes estrella"), Frecuentes (Repeat, "Clientes recurrentes"), Ticket promedio (Receipt, "Por pedido"), Nuevos este mes (UserPlus, "Inscripciones recientes"). `KPICard` con skeletons `KpiSkeleton` mientras carga.
+  - **Filters bar** (Card con p-4): Input de búsqueda con icono Search + botón limpiar (debounce 300ms vía `useEffect`+`setTimeout` que actualiza `debouncedSearch` y resetea `page` a 0). Select de clasificación (ALL/VIP/FRECUENTE/NUEVO/INACTIVO) con `setPage(0)` inline en `onValueChange` (NO en useEffect — evita error lint `react-hooks/set-state-in-effect`). Select de ordenamiento (lastOrderAt/name/totalSpent/ordersCount/createdAt). Botón toggle de sortOrder (ArrowUp/ArrowDown, aria-label dinámico). Botón "Limpiar" visible solo si hay filtros activos.
+  - **Tabla** (`Table` con `overflow-x-auto` en mobile): 8 columnas — Cliente (name + email muted), Teléfono (hidden md+), Ciudad (hidden lg+), Clasificación (badge custom), Pedidos (text-right, tabular-nums), Total gastado (text-right, tabular-nums), Último pedido (hidden md+, relative time "hace X días" con tooltip de fecha larga), Acciones ("Ver detalle" button). Filas clickables (abren drawer). `aria-sort` en `<th>` (ascending/descending/none) + `aria-pressed` en botones sortable. Iconos ArrowUp/ArrowDown en columna activa, ArrowUpDown dim en inactivas.
+  - **Columnas ordenables**: Cliente (name), Pedidos (ordersCount), Total gastado (totalSpent), Último pedido (lastOrderAt). Click en header → si es la misma columna, toggles sortOrder; si es nueva, setea sortBy + orden inicial razonable (asc para name, desc para los demás).
+  - **Pagination**: prev/next + "Mostrando X–Y de Z cliente(s)" + "Pág. N" + disabled states cuando no hay prev/next o está fetching. Spinner "Actualizando…" overlay en esquina superior derecha durante refetch en background.
+  - **Empty state**: "No hay clientes registrados" con icono Inbox + mensaje contextual según filtros activos.
+  - **Skeletons**: `RowSkeleton` (8 filas) mientras carga la lista inicial. `KpiSkeleton` para las 5 cards.
+  - **Detail drawer (Sheet)**: `SheetContent side="right" sm:max-w-2xl`, layout flex-col con header fijo + body scrollable + footer condicional. Header: nombre (xl bold) + classification badge + email/phone con links mailto/tel. Body: sección Contacto (InfoRow con icon, email link, phone link, ciudad, dirección), sección Estadísticas (4 MiniStat en grid 2→4: Total gastado, Pedidos totales, Ticket promedio = totalSpent/ordersCount, Último pedido relative), sección Historial de pedidos (tabla con orderNumber link a /dashboard/pedidos + StatusBadge + PaymentMethodBadge + total + items count + fecha). Footer: Shopify ID en mono muted (solo si existe). Empty state del historial: "Sin pedidos registrados" con icono Inbox.
+  - **Subcomponentes**: `ClassificationBadge` (usa CLASSIFICATION_BADGE_CLASSES, fallback outline para valores desconocidos), `PaymentMethodBadge` (PREPAID=zinc, COD=amber, fallback muted), `SortableHeader` (button con aria-pressed + icono), `ariaSortValue` helper, `MiniStat` (border card con icon + label + value), `InfoRow` (icon + label + content), `SectionTitle` (uppercase muted), `KpiSkeleton` y `RowSkeleton`.
+  - **Queries TanStack**: `['customers-stats']` (staleTime 30s), `['customers', classification, debouncedSearch, sortBy, sortOrder, page]` con `placeholderData: prev` para mantener data anterior durante refetch, `['customer', selectedId]` enabled cuando hay selectedId. Toasts de error vía `useEffect` sobre `query.error` (no en render directo).
+  - **Colores**: ningún indigo/azul. Badges amber (VIP/COD), emerald (FRECUENTE), zinc (NUEVO/PREPAID), rose (INACTIVO). Texto secundario `text-muted-foreground`.
+  - **Responsive**: tabla con `overflow-x-auto`, columnas Teléfono/Ciudad/Último pedido ocultas en mobile/tablet según breakpoint, KPI grid 1→2→3→5, drawer full-width en mobile / 2xl en desktop.
+  - **Accesibilidad**: aria-labels en todos los botones (toggle sortOrder, limpiar búsqueda, abrir/cerrar drawer), aria-sort en `<th>`, aria-pressed en botones sortable, role implícitos, sr-only en SheetDescription, links con hover:underline, labels htmlFor en inputs.
+- **Lint**: `bun run lint` → 0 errores después de dos fixes: (1) removí `aria-sort` del `<button>` interno (role=button no soporta aria-sort) y lo moví al `<th>` (TableHead) usando helper `ariaSortValue`; usé `aria-pressed` en el botón. (2) Removí el `useEffect` que hacía `setPage(0)` cuando cambiaba `classification` — `setPage(0)` ya se ejecuta inline en el `onValueChange` del Select, el effect era redundante y disparaba error `react-hooks/set-state-in-effect`.
+- **Verificación end-to-end** (Agent Browser logueado como admin@demo.com/admin123):
+  * `GET /dashboard/clientes` → HTTP 200, compila en 7.4s (primera vez), render 360ms. HTML 83KB.
+  * Header "Clientes" + subtitle renderizados. KPI region con 5 cards mostrando valores reales: Total=9, VIP=2, Frecuentes=3, Ticket promedio=$ 764.675, Nuevos este mes=9 (coincide con `GET /api/customers?stats=true`).
+  * Tabla renderiza 9 clientes con datos reales: Diego Restrepo (NUEVO), Carlos Ramírez (VIP, 24 pedidos, $4.850.000), Valentina Mesa (VIP, 18 pedidos), Andrés Caicedo (FRECUENTE, 9 pedidos), Luisa Gómez (NUEVO), etc. Relative times "hace 13 horas", "hace 1 día", "hace 3 días" funcionando.
+  * Filtro clasificación=VIP → solo 2 clientes VIP mostrados. "Mostrando 1–2 de 2 clientes".
+  * Botón "Limpiar" restaura los 9 clientes. "Mostrando 1–9 de 9 clientes".
+  * Botón toggle sortOrder: cambiaba label dinámicamente entre "Cambiar a ascendente" y "Cambiar a descendente".
+  * Click en header "TOTAL GASTADO" → ordena desc: $4.850.000, $3.200.000, $1.540.000 (top 3). Sorting operativo.
+  * Click "Ver detalle" en Carlos Ramírez → drawer (Sheet) abre a la derecha. Muestra: nombre + badge VIP, email/phone links, sección Contacto (email mailto, phone tel, ciudad Bogotá, dirección), sección Estadísticas (4 mini-stats), sección Historial de pedidos con tabla mostrando #1001 (Enviado, Prepago, $97.900, 1 item, 10/07/2026 02:57), #1008 (Preparando), #1014 (Entregado) — StatusBadge y PaymentMethodBadge renderizando correctamente, orderNumber con link a /dashboard/pedidos. Close button cierra el drawer.
+  * Browser console: 0 errores. 0 page errors.
+- **Cumplimiento de reglas**:
+  * Sin colores indigo/azul — clasificaciones amber/emerald/zinc/rose, payment zinc/amber.
+  * Responsive mobile-first — KPI 1→2→3→5, tabla overflow-x-auto, columnas ocultas en breakpoints.
+  * shadcn/ui components (Card, Table, Badge, Button, Input, Select, Sheet, Skeleton, Separator) sin crear nuevos.
+  * lucide-react icons (Users, Crown, Repeat, Receipt, UserPlus, Search, ArrowUp, ArrowDown, ArrowUpDown, Mail, Phone, MapPin, ChevronLeft, ChevronRight, Eye, Inbox, Loader2, ShoppingCart, Hash, CalendarClock, Building2, X).
+  * TanStack Query (useQuery para lista+stats+detalle con placeholderData prev, enabled condicional para detalle).
+  * sonner toast para errores (via useEffect sobre query.error).
+  * date-fns (formatDistanceToNow + locale es) para tiempo relativo.
+  * `'use client'` en top del archivo.
+  * Footer sticky ya resuelto por AppShell (`min-h-screen flex flex-col` + `footer mt-auto`).
+  * API endpoints consumidos read-only (no modificados).
+
+Stage Summary:
+- 1 archivo creado: `src/app/(dashboard)/dashboard/clientes/page.tsx` (~980 líneas, client component). Sin nuevos componentes shadcn ni rutas adicionales.
+- Página CRM de clientes completa y polida: KPIs (5 cards), filtros (búsqueda debounce 300ms + clasificación + sort + toggle asc/desc), tabla con 8 columnas ordenables, paginación, drawer (Sheet) con contacto + 4 mini-stats + historial de pedidos (StatusBadge + PaymentMethodBadge), footer con Shopify ID.
+- Cumple spec fielmente: shapes de Customer/CustomerWithOrders/Stats correctos, CLASSIFICATION_BADGE_CLASSES importado y aplicado, StatusBadge reutilizado para estados de orden, formato COP vía formatCOP, relative time vía date-fns locale es, sin colores indigo/azul.
+- Lint limpio (0 errores). Dev server saludable. End-to-end verificado con Agent Browser logueado como ADMIN: 9 clientes seed renderizando, filtros operativos, sorting funcional, drawer con historial de pedidos (3 pedidos de Carlos Ramírez mostrados con #1001/#1008/#1014, estados Enviado/Preparando/Entregado, payment badges, totales formateados en COP).
+- Pendiente para futuros agentes: (a) el sub-menú del sidebar ya linkea /dashboard/clientes, (b) el drawer podría tener un botón "Editar cliente" o "Crear pedido" para cerrar el loop de CRM, (c) agregar exportación CSV/Excel de la lista filtrada, (d) el campo address no aparece en el listado pero se muestra en el drawer — evaluar si conviene mostrarlo como columna oculta opcional, (e) para clientes con muchos pedidos (>50) considerar paginación dentro del drawer o un link "Ver todos los pedidos".
+
+---
+Task ID: F4.5
+Agent: main
+Task: Verificación Fase 4 + integración reclasificación en order.service
+
+Work Log:
+- Verifiqué que el algoritmo de clasificación funciona: reclassifyAllCustomers procesó 9 clientes (0 reclasificados porque el seed ya tenía clasificaciones correctas).
+- Integré updateCustomerStatsAfterOrder en createOrderFromShopify: tras crear un pedido, actualiza totalSpent/ordersCount/lastOrderAt Y reclasifica al cliente automáticamente.
+- Verificación Agent Browser:
+  - Login admin → /dashboard/clientes OK
+  - KPIs: Total=9, VIP=2, Frecuentes=3, Ticket promedio=$764.675, Nuevos este mes=9
+  - Tabla con 9 clientes, badges de clasificación (VIP amber, Frecuente emerald, Nuevo zinc, Inactivo rose)
+  - Sortable headers funcionan (click en TOTAL GASTADO ordena desc)
+  - Filtro por clasificación (VIP → solo 2 clientes)
+  - Drawer de detalle: contacto, estadísticas (4 mini-cards), historial de pedidos con StatusBadge + PaymentMethodBadge
+- Lint: 0 errores. Browser errors: 0.
+
+Stage Summary:
+- Fase 4 (CRM Clientes) COMPLETA y verificada end-to-end.
+- Algoritmo de clasificación puro y testeable (classification.ts).
+- Clasificación automática al importar pedidos (integrado en createOrderFromShopify).
+- API /api/customers (list+filtros+stats+detail) operativa.
+- Página /dashboard/clientes con KPIs, tabla sortable, filtros, drawer con historial.
+- Reclasificación batch disponible (reclassifyAllCustomers) para cron/mantenimiento.
+
+---
+Task ID: F5.1-F5.2
+Agent: main
+Task: Fase 5 backend — módulos analytics (product.analytics, returns.metrics, profitability.metrics) + 3 APIs
+
+Work Log:
+- Creé `src/modules/analytics/product.analytics.ts`: getStarProducts (3 categorías: más vendido por cantidad, mayor facturación, mayor utilidad), getProductRanking (ranking ordenable + paginable + search), getProductStats (KPIs catálogo).
+- Creé `src/modules/analytics/returns.metrics.ts`: getReturnsDetailedMetrics (count, tasa, valor perdido, top producto, top ciudad + top 5 productos y top 5 ciudades), getReturnsList (lista paginada con order+customer+product).
+- Creé `src/modules/analytics/profitability.metrics.ts`: getProfitabilityByPeriod (filtro day/week/month/year/all, ingresos=ventas+transporte cobrado, costos por categoría, utilidad bruta/neta, margen), getProfitabilityTrend (30 días), getCostBreakdown (donut).
+- Creé 3 APIs: /api/analytics/products (star+stats+ranking), /api/analytics/returns (metrics+list), /api/analytics/profitability (period+trend+breakdown).
+- Fix: faltaban comas en RETURN_INCLUDE object → corregido.
+- Lint: 0 errores.
+- Guardada limitación de Fase 4 (reclasificación al cancelar) para documentar en ESTADO_PROYECTO.md.
+
+Stage Summary:
+- Backend de Fase 5 completo: 3 módulos analytics nuevos + 3 APIs.
+- Product analytics con 3 métricas de producto estrella + ranking completo.
+- Returns analytics con métricas detalladas + top 5 productos/ciudades + lista paginada.
+- Profitability con filtro de período + tendencia 30 días + cost breakdown.
+- Pendiente: 3 páginas UI (productos, devoluciones, finanzas) → delegado a subagents.
+
+---
+Task ID: F5.3-c
+Agent: fullstack-developer (finanzas subagent)
+Task: Página /dashboard/finanzas — analítica de rentabilidad con filtro de período, KPIs, gráficos y estado de resultados
+
+Work Log:
+- Leí worklog.md (especialmente F5.1-F5.2) y ESTADO_PROYECTO.md para alinear con el backend ya construido.
+- Verifiqué la API /api/analytics/profitability (route.ts) y el módulo profitability.metrics.ts: 2 modos de uso (period+breakdown / trend), formas ProfitabilityByPeriod + CostBreakdownItem + TrendPoint.
+- Verifiqué helpers disponibles en @/lib/format (formatCOP, cn) y el componente KPICard.
+- Creé `src/app/(dashboard)/dashboard/finanzas/page.tsx` (client component):
+  - Header con título "Finanzas y Rentabilidad" + subtítulo + selector de período (segmented control custom con Button group: Hoy/Semana/Mes/Año/Todo, default Mes, muestra label corto en móvil).
+  - KPI row (5 cards, grid responsive 1→2→3→5): Ingresos totales (DollarSign + ordersCount), Utilidad bruta (TrendingUp, emerald si >0), Utilidad neta (Wallet, emerald>0/rose<0), Margen (Percent, emerald≥20%/zinc 0-20%/rose<0%), Transporte cobrado (Truck + "COD pagados").
+  - Charts section (grid lg:5 cols: trend 3 / donut 2):
+    * Tendencia de utilidad (30 días): AreaChart con área emerald (revenue + gradient fill), línea rose (costs), línea violet (profit). Tooltip custom muestra los 3 con dots de color. Height 300px. Legend en header del card.
+    * Desglose de costos (donut): PieChart innerRadius=70 outerRadius=100, 4 segments (Producto=emerald, Envío=teal, Publicidad=amber, Operación=violet). Center overlay con total. Legend grid 2x2 con monto+% por categoría. Placeholder "Sin costos registrados" si total=0.
+  - Tabla detalle de costos (lg:3): 4 filas siempre presentes (CATEGORY_ORDER) con dot de color, monto, % y barra de progreso custom (width=percentage). scroll-x nativo del Table.
+  - Estado de resultados (lg:2): Ingresos por ventas, Transporte cobrado, **Ingresos totales** (subtotal), (−) Producto, (−) Envío, **= Utilidad bruta** (emerald), (−) Publicidad, (−) Operación, **= Utilidad neta** (emerald/rose según signo), Margen con badge coloreado + ArrowUp/ArrowDown.
+- TanStack Query: query 'analytics.profitability.<period>' (refetch on period change, staleTime 30s) + query 'analytics.profitability.trend' (staleTime 5min, fetch once). Toasts via useEffect (v5 removió onError de options).
+- Loading: skeletons dedicados para KPIs (KPICard.loading), charts (ChartsSkeleton), tabla (TableSkeleton) e income statement.
+- Colores: paleta emerald/teal/amber/violet/rose explícita vía hex (sin indigo/azul). Uso de text-muted-foreground para secundarios.
+- Responsive: KPI grid 1→2→3→5, charts lg:grid-cols-5 (3+2), table+statement lg:grid-cols-5 (3+2), segmented control full-width en móvil.
+- Footer sticky heredado del layout (dashboard/layout.tsx).
+- Lint: `npx eslint src/app/(dashboard)/dashboard/finanzas/page.tsx` → 0 errores. (Nota: `bun run lint` global reporta 1 error en productos/page.tsx — archivo de otro agente, no mío.)
+- Dev server: GET /dashboard/finanzas → 307 (auth redirect, compile OK 1732ms, sin errores).
+
+Stage Summary:
+- Página /dashboard/finanzas COMPLETA y compilando sin errores.
+- Consume 2 endpoints ya existentes (F5.1) — 0 cambios en backend.
+- UI polished: segmented control, KPIs con tono semántico, área+líneas para tendencia, donut con centro y leyenda, tabla con barras de progreso, income statement completo.
+- Paleta corporativa respetada (emerald/rose/violet/teal/amber, sin indigo/azul).
+- Responsive mobile-first, skeletons en todas las secciones, toasts de error.
+- Pendiente: páginas hermanas /dashboard/productos y /dashboard/devoluciones (otros subagents F5.3-a/b) — el parse error en productos/page.tsx debe ser corregido por su agente.
+
+---
+Task ID: F5.3-b
+Agent: full-stack-developer (subagent)
+Task: Página UI /dashboard/devoluciones — Control de Devoluciones (analytics + tabla)
+
+Work Log:
+- Leí worklog.md (sección F5.1-F5.2) y ESTADO_PROYECTO.md: confirmé que el backend de Fase 5 ya está completo (3 módulos analytics + 3 APIs en /api/analytics/{products,returns,profitability}). Las APIs /api/analytics/returns (metrics + list) están operativas con los shapes `ReturnsDetailedMetrics` y `ReturnsListResult` (returns.metrics.ts).
+- Leí `src/lib/format.ts` (formatCOP, formatDate dd/MM/yyyy HH:mm, truncate, cn), `src/components/shared/kpi-card.tsx` (props: title, value, subtitle, icon, loading, className → aplica a Card root; icono se renderiza en contenedor `bg-muted` por lo que el hint rose se logra coloreando el propio icono ReactNode).
+- Leí `src/app/(dashboard)/dashboard/clientes/page.tsx` para alinear patrones (debounce 300ms, useQuery con placeholderData prev, toasts en useEffect sobre query.error, KpiSkeleton/RowSkeleton, paginación from/to/hasNext/hasPrev, botón Limpiar condicional, indicador "Actualizando…").
+- Leí `src/components/charts/orders-status-chart.tsx` como referencia de BarChart layout="vertical" con Cell + CustomTooltip.
+- Confirmé que la carpeta `src/app/(dashboard)/dashboard/devoluciones/` existía pero estaba vacía, y que el sidebar (`src/components/layout/app-shell.tsx` línea 82) ya enlaza `/dashboard/devoluciones` con icono Undo2.
+- Creé `src/app/(dashboard)/dashboard/devoluciones/page.tsx` (~660 líneas, client component):
+  * Header: "Control de Devoluciones" + subtitle "Métricas y análisis de productos devueltos", icono Undo2.
+  * KPI row (grid 1→2→4): 4 KPICard alimentadas por `GET /api/analytics/returns?metrics=true`:
+    1. Total devoluciones — Undo2 — value=count, subtitle=Top ciudad o "En la plataforma".
+    2. Tasa de devolución — Percent — value=`${rate}%`, subtitle=`de ${totalOrders} pedidos`.
+    3. Valor perdido — DollarSign (icono coloreado rose-600/rose-400) — value=formatCOP(lostValue), subtitle="Acumulado en devoluciones", className `border-rose-200 dark:border-rose-900/50` para hint rose en el borde de la card.
+    4. Producto más devuelto — Package — value=topProduct?.title ?? "N/A", subtitle=`${count} devoluciones` o "Sin datos".
+  * Charts section (grid 1→2 en lg): 2 Cards con Recharts BarChart layout="vertical":
+    1. "Top productos devueltos" (icono Package rose) — topProducts array, bars=count, Cell fill `#f43f5e` (rose-500). Y axis = shortTitle (truncate 22). CustomTooltip muestra título completo + devoluciones + valor perdido (rose).
+    2. "Top ciudades con devoluciones" (icono MapPin amber) — topCities array, bars=count, Cell fill `#f59e0b` (amber-500). Y axis = city. CustomTooltip muestra ciudad + devoluciones + valor perdido (amber).
+    * Si topProducts/topCities vacíos → EmptyChart con icono PackageX + "Sin datos de devoluciones".
+    * Skeleton ChartSkeleton (5 barras) mientras carga.
+  * Returns table (Card con borde, overflow-x-auto):
+    * Filters bar (border-b p-4, flex-col→lg:flex-row): search con icono Search (debounce 300ms via useEffect+setTimeout), X clear button; Select "Ordenar por" con opciones createdAt/lostValue/orderNumber; Button size="icon" toggle asc/desc (ArrowUp/ArrowDown); Button "Limpiar" condicional (hasActiveFilters).
+    * Tabla shadcn (8 columnas): Pedido (orderNumber como Link a /dashboard/pedidos, hover rose), Cliente (name + email muted truncate), Producto (truncate max-w-[220px] con title, hidden md), Ciudad (hidden lg), Motivo (ReasonCell con tooltip shadcn para texto completo cuando >32 chars, hidden md), Valor perdido (formatCOP, text-rose-600/400, tabular-nums, text-right), Estado (ReturnStatusBadge), Fecha (formatDate dd/MM/yyyy HH:mm, hidden sm).
+    * ReturnStatusBadge: mapa RETURN_STATUS_META → RECEIVED=zinc, INSPECTED=amber, RESTOCKED=emerald, DISCARDED=rose (con variantes dark). Default "Desconocido" muted.
+    * Empty state: TableRow con colSpan=8, icono Inbox, "Sin devoluciones registradas" + mensaje contextual según hasActiveFilters.
+    * Indicador "Actualizando…" (Loader2 spin) top-right cuando isFetching && !isLoading.
+    * Paginación: Separator + footer con "Mostrando X–Y de N devolución(es)" + botones Anterior/Siguiente (disabled en bordes o fetching) + "Pág. N".
+  * TanStack Query: metricsQuery (staleTime 30s) + listQuery (placeholderData prev, queryKey con debouncedSearch/sortBy/sortOrder/page).
+  * Toasts sonner en useEffect sobre metricsQuery.error y listQuery.error.
+  * Skeletons: KpiSkeleton (4), ChartSkeleton (2), RowSkeleton (6 filas) durante carga inicial.
+  * Responsive: KPI grid 1→2→4, charts 1→2 (stack en mobile), tabla overflow-x-auto con columnas ocultas por breakpoint (md/lg/sm).
+  * Sin colores indigo/azul. Paleta: rose/amber/zinc/emerald. `text-muted-foreground` para secundario.
+  * `'use client'` en top. Footer sticky heredado del layout AppShell (`min-h-screen flex flex-col` + `footer mt-auto`).
+- Lint: `bun run lint` → 0 errores en mi archivo (única warning existente en productos/page.tsx, no relacionada).
+- Compile check: `curl http://localhost:3000/dashboard/devoluciones` → 307 (redirect a login por no-auth, compile exitoso en 3.6s, 0 errores en dev.log). El dev server está saludable.
+
+Stage Summary:
+- 1 archivo creado: `src/app/(dashboard)/dashboard/devoluciones/page.tsx` (~660 líneas, client component). Sin nuevos componentes shadcn ni rutas adicionales (la ruta ya estaba enlazada en el sidebar).
+- Página de Control de Devoluciones completa y polida: 4 KPIs (con hint rose en valor perdido), 2 gráficos horizontales (top productos rose + top ciudades amber) con tooltips ricos y empty state, tabla con 8 columnas (pedido linkeado, cliente, producto, ciudad, motivo con tooltip, valor perdido rose, estado con badge colorido, fecha), filtros (búsqueda debounce 300ms + sort select + toggle asc/desc + limpiar), paginación, skeletons, toasts.
+- Cumple spec fielmente: shapes ReturnsMetrics/ReturnListItem correctos, colores rose/amber/zinc/emerald (sin indigo/azul), ResponsiveGrid 1→2→4, charts stack en mobile, tabla overflow-x-auto, footer sticky vía layout.
+- Lint limpio (0 errores en el archivo). Dev server saludable. Compilación on-demand exitosa.
+- Pendiente para futuros agentes: (a) la columna Pedido linkea a /dashboard/pedidos (genérico) — cuando exista ruta /dashboard/pedidos/[id] se podría enlazar al detalle específico pasando orderId; (b) evaluar agregar un drawer de detalle de devolución (Sheet) con timeline de inspección/reabastecimiento; (c) exportación CSV de la lista filtrada; (d) filtro por estado de devolución (RECEIVED/INSPECTED/RESTOCKED/DISCARDED) y por rango de fechas; (e) acción masiva "Marcar como reabastecida/descartada" cuando se implemente mutación.
+
+---
+Task ID: F5.3-a
+Agent: fullstack-developer (subagent)
+Task: Página /dashboard/productos — Analítica de Productos (UI)
+
+Work Log:
+- Leí worklog.md (Task 1, Fase 4, F5.1-F5.2) y ESTADO_PROYECTO.md. Confirmé que el backend de Fase 5 ya está completo: `/api/analytics/products` con 3 modos (star=true, stats=true, ranking con sortBy/sortOrder/limit/offset/search).
+- Revisé `src/lib/format.ts` (formatCOP, formatNumber, cn), `src/components/shared/kpi-card.tsx` (API KPICard con title/value/icon/subtitle/trend/loading) y `src/app/(dashboard)/dashboard/clientes/page.tsx` como referencia de patrones (TanStack Query + debounce 300ms + skeletons + sonner + Select + Table + paginación).
+- Creé `src/app/(dashboard)/dashboard/productos/page.tsx` (1009 líneas, 'use client'):
+  - Header: "Analítica de Productos" + subtítulo con icono Package.
+  - KPI row (5 cards, grid 1→2→3→5): Total productos (Package), Productos activos (PackageCheck), Unidades vendidas (TrendingUp), Ingresos totales (formatCOP, DollarSign), Margen promedio (Percent, `${avgMargin}%`, subtitle dinámico: "Margen saludable" ≥30% / "Margen positivo" >0 / "Sin utilidad"). Fuente: `?stats=true`.
+  - Star products (3 cards, grid 1→3): Más vendido (ShoppingCart, amber), Mayor facturación (DollarSign, emerald), Mayor utilidad (TrendingUp, violet). Cada card muestra icono+label, thumb del producto (con fallback ImageOff), título + SKU monospace, métrica primaria grande, y 2-3 métricas secundarias en grid. Estado "Sin datos" con Inbox cuando es null. Fuente: `?star=true`.
+  - Filters bar: search input (debounce 300ms con X clear), Select ordenar por (revenue default/quantity/profit/margin), toggle asc/desc, botón Limpiar cuando hay filtros activos.
+  - Ranking table (shadcn Table, scroll-x en móvil): columnas # (rank), Producto (thumb+title+SKU monospace), Cantidad (sortable), Ingresos (sortable, formatCOP), Costo (hidden md, formatCOP muted), Utilidad (sortable, emerald si >0, rose si <0), Margen (sortable, badge emerald ≥30% / zinc 10-30% / rose <10%). Sortable headers con ArrowUp/ArrowDown/ArrowUpDown y aria-sort.
+  - Empty state: "Sin productos vendidos" con Inbox, mensaje contextual según filtros.
+  - Pagination footer: rango "Mostrando X–Y de N productos", indicador "Actualizando…" durante refetch, botones Anterior/Siguiente + "Página N".
+  - Skeletons: KpiSkeleton (5 cards), StarCard skeleton (3 cards con layout completo), RowSkeleton (8 filas).
+  - 3 useQuery independientes (product-stats, product-star, product-ranking) con staleTime 30s y placeholderData para ranking. Toasts sonner en useEffect por cada error.
+  - Sin colores indigo/azul. Acentos amber/emerald/violet/zinc/rose únicamente. Tipografía con text-muted-foreground para texto secundario.
+- Lint: `bun run lint` → 0 errores, 0 warnings (tuve que quitar un eslint-disable no usado en el <img> del ProductThumb).
+- Dev server: la ruta compiló correctamente (307 redirect a /login al no estar autenticado, 1582ms compile). Sin errores en dev.log.
+
+Stage Summary:
+- Página /dashboard/productos COMPLETA y verificada (compila + lint 0 errores).
+- Cumple todos los requisitos UI/UX: 5 KPIs, 3 star cards con placeholders, filters bar (search+sort+toggle), ranking table sortable con badges de margen, paginación, skeletons, toasts, responsive.
+- Reutiliza KPICard, shadcn Table/Select/Input/Button/Badge/Skeleton, formatCOP/formatNumber de @/lib/format. No modifica componentes existentes.
+- Pendiente para Fase 5 completa: verificar end-to-end con Agent Browser (login + navegación) — las APIs ya están operativas desde F5.1-F5.2.
+
+---
+Task ID: F5.4
+Agent: main
+Task: Verificación Fase 5 + actualización ESTADO_PROYECTO.md con limitación Fase 4
+
+Work Log:
+- Verificación Agent Browser de las 3 páginas:
+  - /dashboard/productos: KPIs (5 cards), productos estrella (3: más vendido, mayor facturación, mayor utilidad = Auriculares Bluetooth), ranking con productos reales, sortable headers.
+  - /dashboard/devoluciones: KPIs (4 cards), 2 bar charts (top productos + top ciudades), tabla con devoluciones, status badges.
+  - /dashboard/finanzas: KPIs (5 cards), trend chart (30 días), donut de costos, tabla de breakdown, estado de resultados, selector de período funcional (day/week/month/year/all) con refetch.
+- Cambio de período en finanzas verificado: click "Año" → GET /api/analytics/profitability?period=year&breakdown=true 200.
+- Lint: 0 errores. Browser errors: 0.
+- Actualicé ESTADO_PROYECTO.md: Fase 4 y Fase 5 marcadas como completas, progreso global 90%, limitación de Fase 4 documentada en sección 6.2.
+
+Stage Summary:
+- Fase 5 (Analítica avanzada) COMPLETA y verificada end-to-end.
+- 3 módulos analytics nuevos (product.analytics, returns.metrics, profitability.metrics).
+- 3 APIs nuevas (/api/analytics/products, /returns, /profitability).
+- 3 páginas UI nuevas (productos, devoluciones, finanzas) con gráficos Recharts.
+- Selector de período funcional en finanzas.
+- Progreso global: ~90%.
+
+---
+Task ID: F6.1-F6.2
+Agent: main
+Task: Fase 6 backend — módulo IA (ai.service + 4 generadores con z-ai-web-dev-sdk) + módulo alerts (evaluadores + service + worker) + 7 APIs
+
+Work Log:
+- Creé `src/modules/ai/ai.service.ts`: wrapper del SDK (callLLM con fallback), saveInsight, listInsights, getLatestInsight, getAiStats. Resiliencia: si LLM falla, genera contenido estadístico fallback.
+- Creé `src/modules/ai/predict-sales.ts`: getDailySales (30 días), calculatePrediction (promedio móvil + regresión lineal + tendencia + confianza), generateSalesPrediction (LLM + fallback).
+- Creé `src/modules/ai/detect-anomalies.ts`: detectAnomalies (media ± 2σ para picos/caídas, >3 devoluciones/día), generateAnomalyReport.
+- Creé `src/modules/ai/monthly-summary.ts`: collectMonthlyData (KPIs del mes desde analytics), generateMonthlySummary.
+- Creé `src/modules/ai/product-analysis.ts`: generateProductAnalysis (usa getStarProducts + getProductRanking). Fix: bug en variable `system` → `systemPrompt`.
+- Creé `src/modules/alerts/alert-evaluators.ts`: 5 evaluadores (COD_UNPAID >24h, GUIDE_ERROR inconsistencia, HIGH_RETURN >15%, LOW_INVENTORY <10u, SALES_DROP >30%). evaluateAllAlerts con Promise.allSettled.
+- Creé `src/modules/alerts/alert.service.ts`: createAlertIfNotExists (deduplicada), processAlertConditions, listAlerts, resolveAlert, getAlertStats.
+- Creé `src/modules/alerts/alert-worker.ts`: setInterval 5 min, auto-arrancado en (dashboard)/layout.tsx.
+- Creé 7 APIs: /api/ai/insights (GET), /api/ai/predict (POST), /api/ai/anomalies (POST), /api/ai/summary (POST), /api/ai/products (POST), /api/alerts (GET+POST evaluate), /api/alerts/[id]/resolve (POST).
+- Lint: 0 errores.
+
+Stage Summary:
+- Backend de Fase 6 completo: módulo IA con 4 generadores (predicción, anomalías, resumen mensual, análisis productos) + módulo alerts con 5 evaluadores + worker periódico.
+- z-ai-web-dev-sdk usado solo en backend (ai.service.ts), con fallback estadístico si falla.
+- Alertas deduplicadas (no crea duplicados del mismo tipo+entidad) + emisión realtime vía emitAlert.
+- Worker de alertas cada 5 min auto-arrancado en layout.
+- Pendiente: 2 páginas UI (inteligencia-ia, alertas) → delegado a subagents.

@@ -1,0 +1,89 @@
+# ============================================================
+# docker-compose.yml — Desarrollo local con todos los servicios
+# ============================================================
+# Incluye: PostgreSQL, Redis, n8n, la app Next.js, y el realtime service.
+
+version: '3.8'
+
+services:
+  # --- PostgreSQL ---
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ecommerce
+      POSTGRES_USER: ecommerce
+      POSTGRES_PASSWORD: ecommerce_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ecommerce"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Redis ---
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- n8n (automatizaciones auxiliares) ---
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: admin
+      N8N_BASIC_AUTH_PASSWORD: n8n_admin_2024
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ecommerce
+      DB_POSTGRESDB_USER: ecommerce
+      DB_POSTGRESDB_PASSWORD: ecommerce_dev_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # --- MinIO (S3-compatible local) ---
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+
+  # --- Realtime service (socket.io) ---
+  realtime:
+    build:
+      context: ./mini-services/realtime
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3003:3003"
+    environment:
+      REALTIME_SECRET: dev-realtime-secret
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

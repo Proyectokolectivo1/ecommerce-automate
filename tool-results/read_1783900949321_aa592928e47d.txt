@@ -1,0 +1,1251 @@
+     1→'use client'
+     2→
+     3→// ============================================================
+     4→// /dashboard/guias — Shipments (Guías) management page
+     5→// ============================================================
+     6→// Client component. Lista envíos con filtros + paginación, KPIs,
+     7→// y un drawer lateral (Sheet) con el detalle completo incluyendo
+     8→// la línea de tiempo de tracking events.
+     9→//
+    10→// Endpoints consumidos (read-only, ya existentes):
+    11→//   GET /api/guides?status=&carrier=&search=&limit=&offset=
+    12→//   GET /api/guides?stats=true
+    13→//   GET /api/guides/[id]
+    14→//   GET /api/guides/[id]/pdf   (download)
+    15→//   POST /api/print?process=true   (forzar cola de impresión — ADMIN/BODEGA)
+    16→
+    17→import { useEffect, useMemo, useState } from 'react'
+    18→import { useSession } from 'next-auth/react'
+    19→import {
+    20→  useQuery,
+    21→  useMutation,
+    22→  useQueryClient,
+    23→} from '@tanstack/react-query'
+    24→import { toast } from 'sonner'
+    25→import {
+    26→  FileText,
+    27→  Printer,
+    28→  Clock,
+    29→  Truck,
+    30→  Search,
+    31→  Filter,
+    32→  Eye,
+    33→  ChevronLeft,
+    34→  ChevronRight,
+    35→  X,
+    36→  Loader2,
+    37→  Inbox,
+    38→  Package,
+    39→  MapPin,
+    40→  User,
+    41→  Mail,
+    42→  Phone,
+    43→  Receipt,
+    44→  Download,
+    45→  Route,
+    46→  Building2,
+    47→  Hash,
+    48→  CircleDot,
+    49→  CalendarClock,
+    50→  ExternalLink,
+    51→} from 'lucide-react'
+    52→
+    53→import { Card, CardContent } from '@/components/ui/card'
+    54→import { Input } from '@/components/ui/input'
+    55→import { Button } from '@/components/ui/button'
+    56→import { Badge } from '@/components/ui/badge'
+    57→import {
+    58→  Table,
+    59→  TableBody,
+    60→  TableCell,
+    61→  TableHead,
+    62→  TableHeader,
+    63→  TableRow,
+    64→} from '@/components/ui/table'
+    65→import {
+    66→  Select,
+    67→  SelectContent,
+    68→  SelectItem,
+    69→  SelectTrigger,
+    70→  SelectValue,
+    71→} from '@/components/ui/select'
+    72→import {
+    73→  Sheet,
+    74→  SheetContent,
+    75→  SheetHeader,
+    76→  SheetTitle,
+    77→  SheetDescription,
+    78→} from '@/components/ui/sheet'
+    79→import { Skeleton } from '@/components/ui/skeleton'
+    80→import { Separator } from '@/components/ui/separator'
+    81→import { ScrollArea } from '@/components/ui/scroll-area'
+    82→import { KPICard } from '@/components/shared/kpi-card'
+    83→import { canAccess } from '@/lib/auth-utils'
+    84→import { cn, formatCOP, formatDate } from '@/lib/format'
+    85→
+    86→// ------------------------------------------------------------
+    87→// Tipos (espejo del payload del API)
+    88→// ------------------------------------------------------------
+    89→
+    90→interface Customer {
+    91→  id: string
+    92→  name: string
+    93→  email: string | null
+    94→  phone: string | null
+    95→}
+    96→
+    97→interface OrderItem {
+    98→  id: string
+    99→  title: string
+   100→  quantity: number
+   101→  sku: string | null
+   102→}
+   103→
+   104→interface Order {
+   105→  id: string
+   106→  orderNumber: string
+   107→  status: string
+   108→  total: number
+   109→  city: string | null
+   110→  address?: string | null
+   111→  customer: Customer
+   112→  items: OrderItem[]
+   113→}
+   114→
+   115→interface TrackingEvent {
+   116→  id: string
+   117→  status: string
+   118→  message: string | null
+   119→  city: string | null
+   120→  occurredAt: string
+   121→  createdAt: string
+   122→}
+   123→
+   124→interface ShipmentWithRelations {
+   125→  id: string
+   126→  orderId: string
+   127→  carrier: string | null
+   128→  guideNumber: string | null
+   129→  mastershopId: string | null
+   130→  status: string
+   131→  pdfUrl: string | null
+   132→  createdAt: string
+   133→  updatedAt: string
+   134→  order: Order
+   135→  trackingEvents: TrackingEvent[]
+   136→}
+   137→
+   138→interface ShipmentsResponse {
+   139→  shipments: ShipmentWithRelations[]
+   140→  total: number
+   141→}
+   142→
+   143→interface GuidesStats {
+   144→  total: number
+   145→  byStatus: Record<string, number>
+   146→  printed: number
+   147→  pendingPrint: number
+   148→}
+   149→
+   150→// ------------------------------------------------------------
+   151→// Constantes de presentación
+   152→// ------------------------------------------------------------
+   153→
+   154→const PAGE_SIZE = 15
+   155→
+   156→const STATUS_OPTIONS = [
+   157→  { value: 'ALL', label: 'Todos los estados' },
+   158→  { value: 'CREATED', label: 'Creado' },
+   159→  { value: 'PRINTED', label: 'Impreso' },
+   160→  { value: 'IN_TRANSIT', label: 'En tránsito' },
+   161→  { value: 'DELIVERED', label: 'Entregado' },
+   162→  { value: 'RETURNED', label: 'Devuelto' },
+   163→] as const
+   164→
+   165→const CARRIER_OPTIONS = [
+   166→  { value: 'ALL', label: 'Todas las transportadoras' },
+   167→  { value: 'SERVIENTREGA', label: 'Servientrega' },
+   168→  { value: 'ENVIA', label: 'Envía' },
+   169→  { value: 'INTERRAPIDISIMO', label: 'Interrapidísimo' },
+   170→  { value: 'COORDINADORA', label: 'Coordinadora' },
+   171→  { value: 'TCC', label: 'TCC' },
+   172→] as const
+   173→
+   174→const CARRIER_LABEL: Record<string, string> = {
+   175→  SERVIENTREGA: 'Servientrega',
+   176→  ENVIA: 'Envía',
+   177→  INTERRAPIDISIMO: 'Interrapidísimo',
+   178→  COORDINADORA: 'Coordinadora',
+   179→  TCC: 'TCC',
+   180→}
+   181→
+   182→const SHIPMENT_STATUS_LABEL: Record<string, string> = {
+   183→  CREATED: 'Creado',
+   184→  PRINTED: 'Impreso',
+   185→  IN_TRANSIT: 'En tránsito',
+   186→  DELIVERED: 'Entregado',
+   187→  RETURNED: 'Devuelto',
+   188→}
+   189→
+   190→// Variante + clases de color por estado (sin indigo/azul).
+   191→const SHIPMENT_STATUS_BADGE: Record<
+   192→  string,
+   193→  { className: string; dot: string }
+   194→> = {
+   195→  CREATED: {
+   196→    className:
+   197→      'border-zinc-300 bg-zinc-100 text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800/70 dark:text-zinc-200',
+   198→    dot: 'bg-zinc-400',
+   199→  },
+   200→  PRINTED: {
+   201→    className:
+   202→      'border-violet-300 bg-violet-100 text-violet-700 dark:border-violet-700 dark:bg-violet-900/30 dark:text-violet-300',
+   203→    dot: 'bg-violet-500',
+   204→  },
+   205→  IN_TRANSIT: {
+   206→    className:
+   207→      'border-teal-300 bg-teal-100 text-teal-700 dark:border-teal-700 dark:bg-teal-900/30 dark:text-teal-300',
+   208→    dot: 'bg-teal-500',
+   209→  },
+   210→  DELIVERED: {
+   211→    className:
+   212→      'border-emerald-300 bg-emerald-100 text-emerald-700 dark:border-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300',
+   213→    dot: 'bg-emerald-500',
+   214→  },
+   215→  RETURNED: {
+   216→    className:
+   217→      'border-rose-300 bg-rose-100 text-rose-700 dark:border-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
+   218→    dot: 'bg-rose-500',
+   219→  },
+   220→}
+   221→
+   222→function statusBadgeClass(status: string): string {
+   223→  return (
+   224→    SHIPMENT_STATUS_BADGE[status]?.className ??
+   225→    'border-border bg-muted text-muted-foreground'
+   226→  )
+   227→}
+   228→
+   229→function statusDotClass(status: string): string {
+   230→  return SHIPMENT_STATUS_BADGE[status]?.dot ?? 'bg-muted-foreground'
+   231→}
+   232→
+   233→interface Filters {
+   234→  status: string
+   235→  carrier: string
+   236→  search: string
+   237→}
+   238→
+   239→const DEFAULT_FILTERS: Filters = {
+   240→  status: 'ALL',
+   241→  carrier: 'ALL',
+   242→  search: '',
+   243→}
+   244→
+   245→// ------------------------------------------------------------
+   246→// Página principal
+   247→// ------------------------------------------------------------
+   248→
+   249→export default function GuiasPage() {
+   250→  const { data: session } = useSession()
+   251→  const role = session?.user?.role ?? ''
+   252→  // ADMIN y BODEGA pueden forzar la cola de impresión.
+   253→  const canProcessQueue = canAccess(role, 'BODEGA')
+   254→  // ADMIN, BODEGA y SERVICIO pueden descargar el PDF de la guía.
+   255→  const canDownloadPdf = canAccess(role, 'BODEGA', 'SERVICIO')
+   256→
+   257→  const qc = useQueryClient()
+   258→  const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS)
+   259→  const [debouncedSearch, setDebouncedSearch] = useState('')
+   260→  const [page, setPage] = useState(0)
+   261→  const [selectedId, setSelectedId] = useState<string | null>(null)
+   262→
+   263→  // Debounce 300ms del input de búsqueda.
+   264→  useEffect(() => {
+   265→    const t = setTimeout(() => {
+   266→      setDebouncedSearch(filters.search.trim())
+   267→      setPage(0)
+   268→    }, 300)
+   269→    return () => clearTimeout(t)
+   270→  }, [filters.search])
+   271→
+   272→  const statsQuery = useQuery<GuidesStats>({
+   273→    queryKey: ['guides-stats'],
+   274→    queryFn: async () => {
+   275→      const res = await fetch('/api/guides?stats=true')
+   276→      if (!res.ok) {
+   277→        const err = (await res.json().catch(() => ({}))) as { error?: string }
+   278→        throw new Error(err?.error ?? `Error ${res.status}`)
+   279→      }
+   280→      return res.json() as Promise<GuidesStats>
+   281→    },
+   282→  })
+   283→
+   284→  const listQueryKey = useMemo(
+   285→    () =>
+   286→      [
+   287→        'guides',
+   288→        filters.status,
+   289→        filters.carrier,
+   290→        debouncedSearch,
+   291→        page,
+   292→      ] as const,
+   293→    [filters.status, filters.carrier, debouncedSearch, page],
+   294→  )
+   295→
+   296→  const listQuery = useQuery<ShipmentsResponse>({
+   297→    queryKey: listQueryKey,
+   298→    queryFn: async () => {
+   299→      const params = new URLSearchParams()
+   300→      if (filters.status && filters.status !== 'ALL')
+   301→        params.set('status', filters.status)
+   302→      if (filters.carrier && filters.carrier !== 'ALL')
+   303→        params.set('carrier', filters.carrier)
+   304→      if (debouncedSearch) params.set('search', debouncedSearch)
+   305→      params.set('limit', String(PAGE_SIZE))
+   306→      params.set('offset', String(page * PAGE_SIZE))
+   307→      const res = await fetch(`/api/guides?${params.toString()}`)
+   308→      if (!res.ok) {
+   309→        const err = (await res.json().catch(() => ({}))) as { error?: string }
+   310→        throw new Error(err?.error ?? `Error ${res.status}`)
+   311→      }
+   312→      return res.json() as Promise<ShipmentsResponse>
+   313→    },
+   314→    placeholderData: (prev) => prev,
+   315→  })
+   316→
+   317→  const processQueueMutation = useMutation({
+   318→    mutationFn: async () => {
+   319→      const res = await fetch('/api/print?process=true', { method: 'POST' })
+   320→      const json = (await res.json().catch(() => ({}))) as {
+   321→        ok?: boolean
+   322→        error?: string
+   323→        processed?: number
+   324→        printed?: number
+   325→        failed?: number
+   326→      }
+   327→      if (!res.ok || !json.ok) {
+   328→        throw new Error(json?.error ?? `Error ${res.status}`)
+   329→      }
+   330→      return json
+   331→    },
+   332→    onSuccess: (data) => {
+   333→      const parts: string[] = []
+   334→      if (typeof data.processed === 'number')
+   335→        parts.push(`${data.processed} procesados`)
+   336→      if (typeof data.printed === 'number')
+   337→        parts.push(`${data.printed} impresos`)
+   338→      if (typeof data.failed === 'number' && data.failed > 0)
+   339→        parts.push(`${data.failed} fallidos`)
+   340→      toast.success(
+   341→        'Cola de impresión procesada' +
+   342→          (parts.length ? ` · ${parts.join(', ')}` : ''),
+   343→      )
+   344→      void qc.invalidateQueries({ queryKey: ['guides-stats'] })
+   345→      void qc.invalidateQueries({ queryKey: ['guides'] })
+   346→    },
+   347→    onError: (err: unknown) => {
+   348→      toast.error('No se pudo procesar la cola', {
+   349→        description: err instanceof Error ? err.message : undefined,
+   350→      })
+   351→    },
+   352→  })
+   353→
+   354→  const shipments = listQuery.data?.shipments ?? []
+   355→  const total = listQuery.data?.total ?? 0
+   356→  const from = total === 0 ? 0 : page * PAGE_SIZE + 1
+   357→  const to = Math.min((page + 1) * PAGE_SIZE, total)
+   358→  const hasNext = to < total
+   359→  const hasPrev = page > 0
+   360→
+   361→  const hasActiveFilters =
+   362→    filters.status !== 'ALL' ||
+   363→    filters.carrier !== 'ALL' ||
+   364→    filters.search.trim() !== ''
+   365→
+   366→  function clearFilters() {
+   367→    setFilters(DEFAULT_FILTERS)
+   368→    setDebouncedSearch('')
+   369→    setPage(0)
+   370→  }
+   371→
+   372→  function handleProcessQueue() {
+   373→    processQueueMutation.mutate()
+   374→  }
+   375→
+   376→  function refreshAll() {
+   377→    void qc.invalidateQueries({ queryKey: ['guides-stats'] })
+   378→    void qc.invalidateQueries({ queryKey: ['guides'] })
+   379→  }
+   380→
+   381→  return (
+   382→    <div className="mx-auto w-full max-w-7xl space-y-6 p-4 md:p-6">
+   383→      {/* Header */}
+   384→      <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+   385→        <div className="space-y-1">
+   386→          <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
+   387→            <Route className="size-6 text-muted-foreground" aria-hidden />
+   388→            Guías
+   389→          </h1>
+   390→          <p className="text-sm text-muted-foreground">
+   391→            Gestiona los envíos, números de guía y seguimiento de
+   392→            transportadoras.
+   393→          </p>
+   394→        </div>
+   395→        {canProcessQueue && (
+   396→          <Button
+   397→            onClick={handleProcessQueue}
+   398→            disabled={processQueueMutation.isPending}
+   399→            className="gap-2"
+   400→            variant="default"
+   401→          >
+   402→            {processQueueMutation.isPending ? (
+   403→              <Loader2 className="size-4 animate-spin" />
+   404→            ) : (
+   405→              <Printer className="size-4" />
+   406→            )}
+   407→            Procesar cola de impresión
+   408→          </Button>
+   409→        )}
+   410→      </header>
+   411→
+   412→      {/* KPI row */}
+   413→      <KpiSection
+   414→        stats={statsQuery.data}
+   415→        loading={statsQuery.isLoading}
+   416→      />
+   417→
+   418→      {/* Filters bar */}
+   419→      <Card className="gap-0 p-4">
+   420→        <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+   421→          <div className="relative flex-1">
+   422→            <Search className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2" />
+   423→            <Input
+   424→              type="search"
+   425→              placeholder="Buscar por guía, pedido o cliente…"
+   426→              value={filters.search}
+   427→              onChange={(e) =>
+   428→                setFilters((f) => ({ ...f, search: e.target.value }))
+   429→              }
+   430→              className="pl-9"
+   431→              aria-label="Buscar guías"
+   432→            />
+   433→          </div>
+   434→          <div className="flex flex-wrap items-center gap-2">
+   435→            <Select
+   436→              value={filters.status}
+   437→              onValueChange={(v) => {
+   438→                setFilters((f) => ({ ...f, status: v }))
+   439→                setPage(0)
+   440→              }}
+   441→            >
+   442→              <SelectTrigger className="w-full sm:w-52" aria-label="Estado de la guía">
+   443→                <div className="flex items-center gap-2">
+   444→                  <Filter className="size-4 text-muted-foreground" />
+   445→                  <SelectValue placeholder="Estado" />
+   446→                </div>
+   447→              </SelectTrigger>
+   448→              <SelectContent>
+   449→                {STATUS_OPTIONS.map((s) => (
+   450→                  <SelectItem key={s.value} value={s.value}>
+   451→                    {s.label}
+   452→                  </SelectItem>
+   453→                ))}
+   454→              </SelectContent>
+   455→            </Select>
+   456→
+   457→            <Select
+   458→              value={filters.carrier}
+   459→              onValueChange={(v) => {
+   460→                setFilters((f) => ({ ...f, carrier: v }))
+   461→                setPage(0)
+   462→              }}
+   463→            >
+   464→              <SelectTrigger className="w-full sm:w-52" aria-label="Transportadora">
+   465→                <SelectValue placeholder="Transportadora" />
+   466→              </SelectTrigger>
+   467→              <SelectContent>
+   468→                {CARRIER_OPTIONS.map((c) => (
+   469→                  <SelectItem key={c.value} value={c.value}>
+   470→                    {c.label}
+   471→                  </SelectItem>
+   472→                ))}
+   473→              </SelectContent>
+   474→            </Select>
+   475→
+   476→            {hasActiveFilters && (
+   477→              <Button
+   478→                variant="ghost"
+   479→                size="sm"
+   480→                onClick={clearFilters}
+   481→                className="gap-1.5"
+   482→              >
+   483→                <X className="size-4" />
+   484→                Limpiar
+   485→              </Button>
+   486→            )}
+   487→          </div>
+   488→        </div>
+   489→      </Card>
+   490→
+   491→      {/* Table */}
+   492→      <Card className="gap-0 overflow-hidden p-0">
+   493→        <div className="overflow-x-auto">
+   494→          <div className="max-h-[640px] overflow-auto">
+   495→            <Table>
+   496→              <TableHeader className="sticky top-0 z-10 bg-card shadow-sm">
+   497→                <TableRow className="hover:bg-transparent">
+   498→                  <TableHead className="pl-4">Guía</TableHead>
+   499→                  <TableHead>Pedido</TableHead>
+   500→                  <TableHead>Cliente</TableHead>
+   501→                  <TableHead className="hidden md:table-cell">Ciudad</TableHead>
+   502→                  <TableHead className="hidden lg:table-cell">
+   503→                    Transportadora
+   504→                  </TableHead>
+   505→                  <TableHead>Estado</TableHead>
+   506→                  <TableHead className="hidden sm:table-cell text-center">
+   507→                    Tracking
+   508→                  </TableHead>
+   509→                  <TableHead className="hidden md:table-cell">Fecha</TableHead>
+   510→                  <TableHead className="pr-4 text-right">Acciones</TableHead>
+   511→                </TableRow>
+   512→              </TableHeader>
+   513→              <TableBody>
+   514→                {listQuery.isLoading && shipments.length === 0
+   515→                  ? Array.from({ length: 8 }).map((_, i) => (
+   516→                      <TableRow key={`sk-${i}`}>
+   517→                        <TableCell className="pl-4">
+   518→                          <Skeleton className="h-4 w-28" />
+   519→                        </TableCell>
+   520→                        <TableCell>
+   521→                          <Skeleton className="h-4 w-20" />
+   522→                        </TableCell>
+   523→                        <TableCell>
+   524→                          <Skeleton className="h-4 w-32" />
+   525→                        </TableCell>
+   526→                        <TableCell className="hidden md:table-cell">
+   527→                          <Skeleton className="h-4 w-24" />
+   528→                        </TableCell>
+   529→                        <TableCell className="hidden lg:table-cell">
+   530→                          <Skeleton className="h-5 w-24 rounded-full" />
+   531→                        </TableCell>
+   532→                        <TableCell>
+   533→                          <Skeleton className="h-5 w-24 rounded-full" />
+   534→                        </TableCell>
+   535→                        <TableCell className="hidden sm:table-cell text-center">
+   536→                          <Skeleton className="mx-auto h-5 w-8 rounded-full" />
+   537→                        </TableCell>
+   538→                        <TableCell className="hidden md:table-cell">
+   539→                          <Skeleton className="h-4 w-24" />
+   540→                        </TableCell>
+   541→                        <TableCell className="pr-4 text-right">
+   542→                          <Skeleton className="ml-auto h-8 w-24" />
+   543→                        </TableCell>
+   544→                      </TableRow>
+   545→                    ))
+   546→                  : shipments.map((s) => (
+   547→                      <ShipmentRow
+   548→                        key={s.id}
+   549→                        shipment={s}
+   550→                        canDownloadPdf={canDownloadPdf}
+   551→                        onView={() => setSelectedId(s.id)}
+   552→                      />
+   553→                    ))}
+   554→              </TableBody>
+   555→            </Table>
+   556→
+   557→            {!listQuery.isLoading && !listQuery.isError && shipments.length === 0 && (
+   558→              <EmptyState hasFilters={hasActiveFilters} onClear={clearFilters} />
+   559→            )}
+   560→
+   561→            {listQuery.isError && (
+   562→              <div className="flex flex-col items-center gap-2 p-12 text-center text-sm">
+   563→                <Inbox className="size-8 text-muted-foreground" />
+   564→                <p className="font-medium">No se pudieron cargar las guías.</p>
+   565→                <p className="text-xs text-muted-foreground">
+   566→                  Revisa tu conexión o intenta de nuevo más tarde.
+   567→                </p>
+   568→                <Button variant="outline" size="sm" onClick={() => listQuery.refetch()}>
+   569→                  Reintentar
+   570→                </Button>
+   571→              </div>
+   572→            )}
+   573→          </div>
+   574→        </div>
+   575→
+   576→        {/* Pagination */}
+   577→        <div className="flex flex-col items-center justify-between gap-3 border-t bg-card p-3 sm:flex-row">
+   578→          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+   579→            {listQuery.isFetching && (
+   580→              <Loader2 className="size-3 animate-spin" aria-hidden />
+   581→            )}
+   582→            <span>
+   583→              {total === 0
+   584→                ? 'Sin resultados'
+   585→                : `Mostrando ${from}–${to} de ${total}`}
+   586→            </span>
+   587→          </div>
+   588→          <div className="flex items-center gap-2">
+   589→            <Button
+   590→              variant="outline"
+   591→              size="sm"
+   592→              onClick={() => setPage((p) => Math.max(0, p - 1))}
+   593→              disabled={!hasPrev || listQuery.isFetching}
+   594→              className="gap-1"
+   595→            >
+   596→              <ChevronLeft className="size-4" />
+   597→              Anterior
+   598→            </Button>
+   599→            <span className="text-xs text-muted-foreground tabular-nums">
+   600→              Pág. {page + 1}
+   601→            </span>
+   602→            <Button
+   603→              variant="outline"
+   604→              size="sm"
+   605→              onClick={() => setPage((p) => p + 1)}
+   606→              disabled={!hasNext || listQuery.isFetching}
+   607→              className="gap-1"
+   608→            >
+   609→              Siguiente
+   610→              <ChevronRight className="size-4" />
+   611→            </Button>
+   612→          </div>
+   613→        </div>
+   614→      </Card>
+   615→
+   616→      {/* Detail drawer */}
+   617→      <GuideDetailSheet
+   618→        shipmentId={selectedId}
+   619→        canDownloadPdf={canDownloadPdf}
+   620→        onClose={() => setSelectedId(null)}
+   621→        onRefresh={refreshAll}
+   622→      />
+   623→    </div>
+   624→  )
+   625→}
+   626→
+   627→// ------------------------------------------------------------
+   628→// KPI row
+   629→// ------------------------------------------------------------
+   630→
+   631→function KpiSection({
+   632→  stats,
+   633→  loading,
+   634→}: {
+   635→  stats: GuidesStats | undefined
+   636→  loading: boolean
+   637→}) {
+   638→  return (
+   639→    <section
+   640→      className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4"
+   641→      aria-label="Indicadores de guías"
+   642→    >
+   643→      <KPICard
+   644→        title="Total guías"
+   645→        value={loading ? '—' : String(stats?.total ?? 0)}
+   646→        icon={<FileText className="size-5" />}
+   647→        loading={loading}
+   648→      />
+   649→      <KPICard
+   650→        title="Impresas"
+   651→        value={loading ? '—' : String(stats?.printed ?? 0)}
+   652→        subtitle="Listas para despacho"
+   653→        icon={<Printer className="size-5" />}
+   654→        loading={loading}
+   655→      />
+   656→      <KPICard
+   657→        title="Pendientes impresión"
+   658→        value={loading ? '—' : String(stats?.pendingPrint ?? 0)}
+   659→        subtitle="En cola"
+   660→        icon={<Clock className="size-5" />}
+   661→        loading={loading}
+   662→      />
+   663→      <KPICard
+   664→        title="En tránsito"
+   665→        value={
+   666→          loading ? '—' : String(stats?.byStatus.IN_TRANSIT ?? 0)
+   667→        }
+   668→        subtitle="En camino al destino"
+   669→        icon={<Truck className="size-5" />}
+   670→        loading={loading}
+   671→      />
+   672→    </section>
+   673→  )
+   674→}
+   675→
+   676→// ------------------------------------------------------------
+   677→// Fila de la tabla
+   678→// ------------------------------------------------------------
+   679→
+   680→function ShipmentRow({
+   681→  shipment,
+   682→  canDownloadPdf,
+   683→  onView,
+   684→}: {
+   685→  shipment: ShipmentWithRelations
+   686→  canDownloadPdf: boolean
+   687→  onView: () => void
+   688→}) {
+   689→  const guideNumber = shipment.guideNumber ?? '—'
+   690→  const trackingCount = shipment.trackingEvents?.length ?? 0
+   691→  const pdfHref = `/api/guides/${shipment.guideNumber ?? shipment.id}/pdf`
+   692→
+   693→  return (
+   694→    <TableRow
+   695→      onClick={onView}
+   696→      className="cursor-pointer"
+   697→      tabIndex={0}
+   698→      role="button"
+   699→      onKeyDown={(e) => {
+   700→        if (e.key === 'Enter' || e.key === ' ') {
+   701→          e.preventDefault()
+   702→          onView()
+   703→        }
+   704→      }}
+   705→    >
+   706→      <TableCell className="pl-4">
+   707→        <div className="flex items-center gap-2">
+   708→          <div className="flex size-8 items-center justify-center rounded-md bg-muted text-muted-foreground">
+   709→            <Hash className="size-4" />
+   710→          </div>
+   711→          <div className="flex flex-col">
+   712→            <span className="font-mono text-sm font-medium">
+   713→              {guideNumber}
+   714→            </span>
+   715→            {canDownloadPdf && shipment.guideNumber && (
+   716→              <a
+   717→                href={pdfHref}
+   718→                target="_blank"
+   719→                rel="noopener noreferrer"
+   720→                onClick={(e) => e.stopPropagation()}
+   721→                className="inline-flex w-fit items-center gap-1 text-[11px] font-medium text-muted-foreground hover:text-foreground"
+   722→              >
+   723→                <ExternalLink className="size-3" />
+   724→                PDF
+   725→              </a>
+   726→            )}
+   727→          </div>
+   728→        </div>
+   729→      </TableCell>
+   730→      <TableCell>
+   731→        <a
+   732→          href={`/dashboard/pedidos`}
+   733→          onClick={(e) => e.stopPropagation()}
+   734→          className="font-mono text-sm font-medium text-foreground hover:underline"
+   735→        >
+   736→          {shipment.order?.orderNumber ?? '—'}
+   737→        </a>
+   738→      </TableCell>
+   739→      <TableCell>
+   740→        <div className="text-sm font-medium">
+   741→          {shipment.order?.customer?.name ?? '—'}
+   742→        </div>
+   743→        {shipment.order?.customer?.email && (
+   744→          <div className="text-xs text-muted-foreground truncate max-w-[180px]">
+   745→            {shipment.order.customer.email}
+   746→          </div>
+   747→        )}
+   748→      </TableCell>
+   749→      <TableCell className="hidden md:table-cell">
+   750→        <span className="text-sm text-muted-foreground">
+   751→          {shipment.order?.city ?? '—'}
+   752→        </span>
+   753→      </TableCell>
+   754→      <TableCell className="hidden lg:table-cell">
+   755→        <CarrierBadge carrier={shipment.carrier} />
+   756→      </TableCell>
+   757→      <TableCell>
+   758→        <ShipmentStatusBadge status={shipment.status} />
+   759→      </TableCell>
+   760→      <TableCell className="hidden sm:table-cell text-center">
+   761→        <Badge variant="outline" className="tabular-nums">
+   762→          {trackingCount}
+   763→        </Badge>
+   764→      </TableCell>
+   765→      <TableCell className="hidden md:table-cell">
+   766→        <span className="text-xs text-muted-foreground">
+   767→          {formatDate(shipment.createdAt)}
+   768→        </span>
+   769→      </TableCell>
+   770→      <TableCell className="pr-4 text-right">
+   771→        <Button
+   772→          variant="ghost"
+   773→          size="sm"
+   774→          onClick={(e) => {
+   775→            e.stopPropagation()
+   776→            onView()
+   777→          }}
+   778→          className="gap-1.5"
+   779→        >
+   780→          <Eye className="size-4" />
+   781→          <span className="hidden sm:inline">Ver detalle</span>
+   782→        </Button>
+   783→      </TableCell>
+   784→    </TableRow>
+   785→  )
+   786→}
+   787→
+   788→// ------------------------------------------------------------
+   789→// Badges personalizados
+   790→// ------------------------------------------------------------
+   791→
+   792→function ShipmentStatusBadge({
+   793→  status,
+   794→  size = 'default',
+   795→}: {
+   796→  status: string
+   797→  size?: 'sm' | 'default'
+   798→}) {
+   799→  const label =
+   800→    SHIPMENT_STATUS_LABEL[status] ?? status ?? 'Desconocido'
+   801→  return (
+   802→    <Badge
+   803→      variant="outline"
+   804→      className={cn(
+   805→        'gap-1.5 border',
+   806→        statusBadgeClass(status),
+   807→        size === 'sm' && 'px-1.5 py-0 text-[10px]',
+   808→      )}
+   809→    >
+   810→      <span
+   811→        className={cn('size-1.5 rounded-full', statusDotClass(status))}
+   812→        aria-hidden
+   813→      />
+   814→      {label}
+   815→    </Badge>
+   816→  )
+   817→}
+   818→
+   819→function CarrierBadge({ carrier }: { carrier: string | null }) {
+   820→  if (!carrier) {
+   821→    return (
+   822→      <Badge variant="outline" className="text-muted-foreground">
+   823→        —
+   824→      </Badge>
+   825→    )
+   826→  }
+   827→  const label = CARRIER_LABEL[carrier] ?? carrier
+   828→  return (
+   829→    <Badge
+   830→      variant="outline"
+   831→      className="border-border bg-muted/60 text-foreground"
+   832→    >
+   833→      <Building2 className="size-3 text-muted-foreground" />
+   834→      {label}
+   835→    </Badge>
+   836→  )
+   837→}
+   838→
+   839→// ------------------------------------------------------------
+   840→// Empty state
+   841→// ------------------------------------------------------------
+   842→
+   843→function EmptyState({
+   844→  hasFilters,
+   845→  onClear,
+   846→}: {
+   847→  hasFilters: boolean
+   848→  onClear: () => void
+   849→}) {
+   850→  return (
+   851→    <div className="flex flex-col items-center justify-center gap-3 p-12 text-center">
+   852→      <div className="flex size-12 items-center justify-center rounded-full bg-muted">
+   853→        <Inbox className="size-6 text-muted-foreground" />
+   854→      </div>
+   855→      <div>
+   856→        <p className="text-sm font-medium">No hay guías registradas</p>
+   857→        <p className="mt-1 text-xs text-muted-foreground">
+   858→          {hasFilters
+   859→            ? 'Prueba con otros filtros o limpia la búsqueda.'
+   860→            : 'Cuando se despachen pedidos, sus guías aparecerán aquí.'}
+   861→        </p>
+   862→      </div>
+   863→      {hasFilters && (
+   864→        <Button variant="outline" size="sm" onClick={onClear} className="gap-1.5">
+   865→          <X className="size-4" />
+   866→          Limpiar filtros
+   867→        </Button>
+   868→      )}
+   869→    </div>
+   870→  )
+   871→}
+   872→
+   873→// ------------------------------------------------------------
+   874→// Detail drawer (Sheet)
+   875→// ------------------------------------------------------------
+   876→
+   877→function GuideDetailSheet({
+   878→  shipmentId,
+   879→  canDownloadPdf,
+   880→  onClose,
+   881→  onRefresh,
+   882→}: {
+   883→  shipmentId: string | null
+   884→  canDownloadPdf: boolean
+   885→  onClose: () => void
+   886→  onRefresh: () => void
+   887→}) {
+   888→  const qc = useQueryClient()
+   889→  const { data, isLoading, isError, refetch } = useQuery<ShipmentWithRelations>({
+   890→    queryKey: ['guide', shipmentId],
+   891→    queryFn: async () => {
+   892→      const res = await fetch(`/api/guides/${shipmentId ?? ''}`)
+   893→      if (!res.ok) {
+   894→        const err = (await res.json().catch(() => ({}))) as { error?: string }
+   895→        throw new Error(err?.error ?? `Error ${res.status}`)
+   896→      }
+   897→      return res.json() as Promise<ShipmentWithRelations>
+   898→    },
+   899→    enabled: !!shipmentId,
+   900→  })
+   901→
+   902→  function handleClose(open: boolean) {
+   903→    if (!open) {
+   904→      onClose()
+   905→      // Invalida para que la próxima apertura traiga data fresca.
+   906→      void qc.invalidateQueries({ queryKey: ['guide', shipmentId] })
+   907→      onRefresh()
+   908→    }
+   909→  }
+   910→
+   911→  const shipment = data
+   912→  const pdfHref = shipment
+   913→    ? `/api/guides/${shipment.guideNumber ?? shipment.id}/pdf`
+   914→    : '#'
+   915→
+   916→  return (
+   917→    <Sheet open={!!shipmentId} onOpenChange={handleClose}>
+   918→      <SheetContent
+   919→        side="right"
+   920→        className="w-full gap-0 p-0 sm:max-w-lg md:max-w-xl"
+   921→      >
+   922→        <SheetHeader className="gap-2 border-b p-5 pr-12">
+   923→          <SheetTitle className="flex items-center gap-2 text-base">
+   924→            <Route className="size-4 text-muted-foreground" />
+   925→            Detalle de la guía
+   926→          </SheetTitle>
+   927→          <SheetDescription className="sr-only">
+   928→            Información completa del envío, orden, items y tracking.
+   929→          </SheetDescription>
+   930→        </SheetHeader>
+   931→
+   932→        <ScrollArea className="flex-1">
+   933→          <div className="space-y-5 p-5">
+   934→            {isLoading && <DetailSkeleton />}
+   935→            {isError && (
+   936→              <div className="flex flex-col items-center gap-2 p-8 text-center text-sm">
+   937→                <Inbox className="size-8 text-muted-foreground" />
+   938→                <p className="font-medium">No se pudo cargar la guía.</p>
+   939→                <Button variant="outline" size="sm" onClick={() => refetch()}>
+   940→                  Reintentar
+   941→                </Button>
+   942→              </div>
+   943→            )}
+   944→            {shipment && !isLoading && !isError && (
+   945→              <>
+   946→                {/* Header del envío */}
+   947→                <div className="space-y-3">
+   948→                  <div className="flex flex-wrap items-center gap-2">
+   949→                    <span className="font-mono text-lg font-semibold tracking-tight break-all">
+   950→                      {shipment.guideNumber ?? 'Sin guía'}
+   951→                    </span>
+   952→                    <ShipmentStatusBadge status={shipment.status} />
+   953→                    <CarrierBadge carrier={shipment.carrier} />
+   954→                  </div>
+   955→                  {canDownloadPdf && shipment.guideNumber && (
+   956→                    <Button asChild variant="default" size="sm" className="gap-1.5">
+   957→                      <a href={pdfHref} target="_blank" rel="noopener noreferrer">
+   958→                        <Download className="size-4" />
+   959→                        Descargar PDF
+   960→                      </a>
+   961→                    </Button>
+   962→                  )}
+   963→                </div>
+   964→
+   965→                <Separator />
+   966→
+   967→                {/* Información del pedido */}
+   968→                <section className="space-y-2">
+   969→                  <SectionTitle icon={Package}>Pedido</SectionTitle>
+   970→                  <div className="grid grid-cols-2 gap-2 rounded-lg border bg-card p-3 text-sm">
+   971→                    <InfoRow
+   972→                      label="Número"
+   973→                      icon={Hash}
+   974→                      value={
+   975→                        <a
+   976→                          href="/dashboard/pedidos"
+   977→                          className="font-mono font-medium text-foreground hover:underline"
+   978→                        >
+   979→                          {shipment.order?.orderNumber ?? '—'}
+   980→                        </a>
+   981→                      }
+   982→                    />
+   983→                    <InfoRow
+   984→                      label="Total"
+   985→                      icon={Receipt}
+   986→                      value={
+   987→                        <span className="font-semibold tabular-nums">
+   988→                          {formatCOP(shipment.order?.total ?? 0)}
+   989→                        </span>
+   990→                      }
+   991→                    />
+   992→                    <InfoRow
+   993→                      label="Ciudad"
+   994→                      icon={MapPin}
+   995→                      value={shipment.order?.city ?? '—'}
+   996→                    />
+   997→                    {shipment.order?.address && (
+   998→                      <InfoRow
+   999→                        label="Dirección"
+  1000→                        icon={MapPin}
+  1001→                        value={
+  1002→                          <span className="max-w-[180px] truncate" title={shipment.order.address}>
+  1003→                            {shipment.order.address}
+  1004→                          </span>
+  1005→                        }
+  1006→                      />
+  1007→                    )}
+  1008→                  </div>
+  1009→                </section>
+  1010→
+  1011→                {/* Cliente */}
+  1012→                <section className="space-y-2">
+  1013→                  <SectionTitle icon={User}>Cliente</SectionTitle>
+  1014→                  <div className="space-y-1 rounded-lg border bg-card p-3 text-sm">
+  1015→                    <InfoRow
+  1016→                      label="Nombre"
+  1017→                      icon={User}
+  1018→                      value={shipment.order?.customer?.name ?? '—'}
+  1019→                    />
+  1020→                    <InfoRow
+  1021→                      label="Email"
+  1022→                      icon={Mail}
+  1023→                      value={
+  1024→                        shipment.order?.customer?.email ? (
+  1025→                          <a
+  1026→                            href={`mailto:${shipment.order.customer.email}`}
+  1027→                            className="text-foreground hover:underline"
+  1028→                          >
+  1029→                            {shipment.order.customer.email}
+  1030→                          </a>
+  1031→                        ) : (
+  1032→                          '—'
+  1033→                        )
+  1034→                      }
+  1035→                    />
+  1036→                    <InfoRow
+  1037→                      label="Teléfono"
+  1038→                      icon={Phone}
+  1039→                      value={
+  1040→                        shipment.order?.customer?.phone ? (
+  1041→                          <a
+  1042→                            href={`tel:${shipment.order.customer.phone}`}
+  1043→                            className="text-foreground hover:underline"
+  1044→                          >
+  1045→                            {shipment.order.customer.phone}
+  1046→                          </a>
+  1047→                        ) : (
+  1048→                          '—'
+  1049→                        )
+  1050→                      }
+  1051→                    />
+  1052→                  </div>
+  1053→                </section>
+  1054→
+  1055→                {/* Items */}
+  1056→                <section className="space-y-2">
+  1057→                  <SectionTitle icon={Package}>Productos</SectionTitle>
+  1058→                  <div className="overflow-hidden rounded-lg border">
+  1059→                    <ul className="divide-y">
+  1060→                      {shipment.order?.items?.length ? (
+  1061→                        shipment.order.items.map((it) => (
+  1062→                          <li
+  1063→                            key={it.id}
+  1064→                            className="flex items-center justify-between gap-3 bg-card p-3 text-sm"
+  1065→                          >
+  1066→                            <div className="min-w-0 flex-1">
+  1067→                              <p className="truncate font-medium">
+  1068→                                {it.title}
+  1069→                              </p>
+  1070→                              {it.sku && (
+  1071→                                <p className="text-xs text-muted-foreground font-mono">
+  1072→                                  SKU: {it.sku}
+  1073→                                </p>
+  1074→                              )}
+  1075→                            </div>
+  1076→                            <Badge variant="secondary" className="tabular-nums">
+  1077→                              x{it.quantity}
+  1078→                            </Badge>
+  1079→                          </li>
+  1080→                        ))
+  1081→                      ) : (
+  1082→                        <li className="p-3 text-sm text-muted-foreground">
+  1083→                          Sin productos.
+  1084→                        </li>
+  1085→                      )}
+  1086→                    </ul>
+  1087→                  </div>
+  1088→                </section>
+  1089→
+  1090→                {/* Tracking timeline */}
+  1091→                <section className="space-y-2">
+  1092→                  <SectionTitle icon={CircleDot}>
+  1093→                    Seguimiento
+  1094→                    {shipment.trackingEvents?.length > 0 && (
+  1095→                      <Badge variant="outline" className="ml-1 tabular-nums">
+  1096→                        {shipment.trackingEvents.length}
+  1097→                      </Badge>
+  1098→                    )}
+  1099→                  </SectionTitle>
+  1100→                  <TrackingTimeline events={shipment.trackingEvents ?? []} />
+  1101→                </section>
+  1102→
+  1103→                {/* Metadata */}
+  1104→                <Separator />
+  1105→                <section className="grid grid-cols-2 gap-2 text-xs text-muted-foreground">
+  1106→                  <div className="flex items-center gap-1.5">
+  1107→                    <CalendarClock className="size-3.5" />
+  1108→                    Creada: {formatDate(shipment.createdAt)}
+  1109→                  </div>
+  1110→                  <div className="flex items-center gap-1.5">
+  1111→                    <CalendarClock className="size-3.5" />
+  1112→                    Actualizada: {formatDate(shipment.updatedAt)}
+  1113→                  </div>
+  1114→                </section>
+  1115→              </>
+  1116→            )}
+  1117→          </div>
+  1118→        </ScrollArea>
+  1119→      </SheetContent>
+  1120→    </Sheet>
+  1121→  )
+  1122→}
+  1123→
+  1124→function DetailSkeleton() {
+  1125→  return (
+  1126→    <div className="space-y-4">
+  1127→      <div className="flex items-center gap-2">
+  1128→        <Skeleton className="h-7 w-40" />
+  1129→        <Skeleton className="h-5 w-20 rounded-full" />
+  1130→        <Skeleton className="h-5 w-24 rounded-full" />
+  1131→      </div>
+  1132→      <Skeleton className="h-9 w-40" />
+  1133→      <Separator />
+  1134→      <div className="grid grid-cols-2 gap-2">
+  1135→        {Array.from({ length: 4 }).map((_, i) => (
+  1136→          <Skeleton key={i} className="h-10" />
+  1137→        ))}
+  1138→      </div>
+  1139→      <Skeleton className="h-24" />
+  1140→      <Skeleton className="h-32" />
+  1141→    </div>
+  1142→  )
+  1143→}
+  1144→
+  1145→// ------------------------------------------------------------
+  1146→// Tracking timeline (vertical, most-recent first)
+  1147→// ------------------------------------------------------------
+  1148→
+  1149→function TrackingTimeline({ events }: { events: TrackingEvent[] }) {
+  1150→  if (!events || events.length === 0) {
+  1151→    return (
+  1152→      <div className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">
+  1153→        Aún no hay eventos de seguimiento registrados.
+  1154→      </div>
+  1155→    )
+  1156→  }
+  1157→
+  1158→  // Most recent first.
+  1159→  const ordered = [...events].sort(
+  1160→    (a, b) =>
+  1161→      new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime(),
+  1162→  )
+  1163→
+  1164→  return (
+  1165→    <ol className="space-y-0">
+  1166→      {ordered.map((ev, i) => {
+  1167→        const isLast = i === ordered.length - 1
+  1168→        return (
+  1169→          <li key={ev.id} className="relative pb-5 pl-6 last:pb-0">
+  1170→            {/* Dot */}
+  1171→            <span
+  1172→              className={cn(
+  1173→                'absolute top-1.5 left-0 size-3 rounded-full ring-2 ring-background',
+  1174→                statusDotClass(ev.status),
+  1175→              )}
+  1176→              aria-hidden
+  1177→            />
+  1178→            {/* Vertical connector (only if not the last item) */}
+  1179→            {!isLast && (
+  1180→              <span
+  1181→                className="absolute top-5 left-[5px] h-full w-px bg-border"
+  1182→                aria-hidden
+  1183→              />
+  1184→            )}
+  1185→            {/* Content */}
+  1186→            <div className="space-y-1">
+  1187→              <div className="flex flex-wrap items-center gap-2">
+  1188→                <ShipmentStatusBadge status={ev.status} size="sm" />
+  1189→                {ev.city && (
+  1190→                  <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+  1191→                    <MapPin className="size-3" />
+  1192→                    {ev.city}
+  1193→                  </span>
+  1194→                )}
+  1195→                <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+  1196→                  <CalendarClock className="size-3" />
+  1197→                  {formatDate(ev.occurredAt)}
+  1198→                </span>
+  1199→              </div>
+  1200→              {ev.message && (
+  1201→                <p className="text-sm text-foreground">{ev.message}</p>
+  1202→              )}
+  1203→            </div>
+  1204→          </li>
+  1205→        )
+  1206→      })}
+  1207→    </ol>
+  1208→  )
+  1209→}
+  1210→
+  1211→// ------------------------------------------------------------
+  1212→// Sub-componentes auxiliares del drawer
+  1213→// ------------------------------------------------------------
+  1214→
+  1215→function SectionTitle({
+  1216→  icon: Icon,
+  1217→  children,
+  1218→}: {
+  1219→  icon: React.ComponentType<{ className?: string }>
+  1220→  children: React.ReactNode
+  1221→}) {
+  1222→  return (
+  1223→    <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+  1224→      <Icon className="size-4 text-muted-foreground" />
+  1225→      {children}
+  1226→    </h3>
+  1227→  )
+  1228→}
+  1229→
+  1230→function InfoRow({
+  1231→  label,
+  1232→  value,
+  1233→  icon: Icon,
+  1234→}: {
+  1235→  label: string
+  1236→  value: React.ReactNode
+  1237→  icon?: React.ComponentType<{ className?: string }>
+  1238→}) {
+  1239→  return (
+  1240→    <div className="flex items-start justify-between gap-3">
+  1241→      <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+  1242→        {Icon && <Icon className="size-3.5" />}
+  1243→        {label}
+  1244→      </span>
+  1245→      <span className="text-right text-xs font-medium text-foreground">
+  1246→        {value ?? '—'}
+  1247→      </span>
+  1248→    </div>
+  1249→  )
+  1250→}
+  1251→

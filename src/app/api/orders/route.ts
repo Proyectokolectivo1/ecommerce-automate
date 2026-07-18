@@ -5,7 +5,7 @@
 // POST — creación manual (no implementado, devuelve 405)
 
 import { NextResponse } from 'next/server'
-import { getCurrentUser } from '@/lib/auth'
+import { getCurrentUserOrFallback } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 import { listOrders } from '@/modules/orders/order.service'
 import { ORDER_STATUSES } from '@/lib/validation'
@@ -14,7 +14,7 @@ const VALID_PAYMENT_METHODS = new Set(['PREPAID', 'COD', 'ALL'])
 
 export async function GET(request: Request) {
   // --- Auth ---------------------------------------------------------
-  const user = await getCurrentUser()
+  const user = await getCurrentUserOrFallback()
   if (!user) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 })
   }

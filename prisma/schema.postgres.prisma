@@ -1,0 +1,381 @@
+// ============================================================
+// schema.postgres.prisma — Schema para PostgreSQL (producción)
+// ============================================================
+// Este archivo es idéntico a schema.prisma pero con provider = "postgresql".
+//
+// Cómo usar en producción:
+//   1. Copia este archivo a schema.prisma:
+//      cp prisma/schema.postgres.prisma prisma/schema.prisma
+//   2. Configura DATABASE_URL en .env:
+//      DATABASE_URL=postgresql://user:pass@host:5432/ecommerce
+//   3. Ejecuta:
+//      bun run db:push
+//      bun run db:seed
+//
+// La lógica de dominio (src/modules/) NO cambia — Prisma abstrae el motor.
+// Los enums en Postgres pueden convertirse a enum nativos (opcional).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// Sección 14-15: Autenticación, Roles y Permisos
+// ============================================================
+
+model User {
+  id                String   @id @default(cuid())
+  email             String   @unique
+  name              String?
+  passwordHash      String
+  role              String   @default("SERVICIO")
+  active            Boolean  @default(true)
+  twoFactorSecret   String?
+  twoFactorEnabled  Boolean  @default(false)
+  lastLoginAt       DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  auditLogs     AuditLog[]
+  notifications Notification[]
+}
+
+// ============================================================
+// Sección 11: CRM Clientes
+// ============================================================
+
+model Customer {
+  id             String   @id @default(cuid())
+  shopifyId      String?  @unique
+  name           String
+  email          String?
+  phone          String?
+  city           String?
+  address        String?
+  classification String   @default("NUEVO")
+  totalSpent     Float    @default(0)
+  ordersCount    Int      @default(0)
+  lastOrderAt    DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  orders Order[]
+}
+
+// ============================================================
+// Catálogo: Productos
+// ============================================================
+
+model Product {
+  id            String   @id @default(cuid())
+  shopifyId     String?  @unique
+  sku           String?  @unique
+  title         String
+  variant       String?
+  cost          Float    @default(0)
+  price         Float    @default(0)
+  weight        Float    @default(0)
+  inventoryQty  Int      @default(0)
+  imageUrl      String?
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  orderItems OrderItem[]
+  returns    Return[]
+}
+
+// ============================================================
+// Sección 7: Pedidos + FSM de 8 estados
+// ============================================================
+
+model Order {
+  id              String   @id @default(cuid())
+  shopifyId       String?  @unique
+  orderNumber     String   @unique
+  customerId      String
+  customer        Customer @relation(fields: [customerId], references: [id])
+  status          String   @default("NUEVO")
+  paymentMethod   String   @default("PREPAID")
+  subtotal        Float    @default(0)
+  shippingCost    Float    @default(0)
+  transportCost   Float    @default(0)
+  total           Float    @default(0)
+  declaredValue   Float    @default(0)
+  city            String?
+  address         String?
+  notes           String?
+  codPaid         Boolean  @default(false)
+  codPaymentLink  String?
+  codPaymentId    String?
+  placedAt        DateTime @default(now())
+  paidAt          DateTime?
+  transportPaidAt DateTime?
+  shippedAt       DateTime?
+  deliveredAt     DateTime?
+  returnedAt      DateTime?
+  cancelledAt     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  items         OrderItem[]
+  statusLogs    OrderStatusLog[]
+  shipments     Shipment[]
+  transactions  Transaction[]
+  returns       Return[]
+  printJobs     PrintJob[]
+  notifications Notification[]
+}
+
+model OrderItem {
+  id          String  @id @default(cuid())
+  orderId     String
+  order       Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product @relation(fields: [productId], references: [id])
+  title       String
+  sku         String?
+  quantity    Int
+  unitPrice   Float
+  unitCost    Float
+  total       Float
+  createdAt   DateTime @default(now())
+}
+
+model OrderStatusLog {
+  id          String   @id @default(cuid())
+  orderId     String
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  fromStatus  String?
+  toStatus    String
+  reason      String?
+  actor       String?
+  metadata    String?
+  createdAt   DateTime @default(now())
+
+  @@index([orderId])
+  @@index([createdAt])
+}
+
+// ============================================================
+// Sección 6: Pagos y Pasarelas
+// ============================================================
+
+model Transaction {
+  id            String   @id @default(cuid())
+  orderId       String
+  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  provider      String
+  type          String
+  amount        Float
+  currency      String   @default("COP")
+  status        String   @default("PENDING")
+  reference     String?  @unique
+  providerTxId  String?
+  paymentUrl    String?
+  rawResponse   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([orderId])
+  @@index([status])
+}
+
+// ============================================================
+// Sección 5: Logística, Guías y Tracking
+// ============================================================
+
+model Shipment {
+  id            String   @id @default(cuid())
+  orderId       String
+  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  carrier       String?
+  guideNumber   String?  @unique
+  mastershopId  String?
+  status        String   @default("CREATED")
+  pdfUrl        String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  trackingEvents TrackingEvent[]
+
+  @@index([orderId])
+}
+
+model TrackingEvent {
+  id          String   @id @default(cuid())
+  shipmentId  String
+  shipment    Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  status      String
+  message     String?
+  city        String?
+  occurredAt  DateTime
+  createdAt   DateTime @default(now())
+
+  @@index([shipmentId])
+}
+
+model PrintJob {
+  id          String   @id @default(cuid())
+  orderId     String
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  guideNumber String?
+  status      String   @default("QUEUED")
+  printer     String?
+  attempts    Int      @default(0)
+  error       String?
+  queuedAt    DateTime @default(now())
+  sentAt      DateTime?
+  printedAt   DateTime?
+
+  @@index([orderId])
+  @@index([status])
+}
+
+// ============================================================
+// Sección 10: Devoluciones
+// ============================================================
+
+model Return {
+  id          String   @id @default(cuid())
+  orderId     String
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId   String?
+  product     Product? @relation(fields: [productId], references: [id])
+  reason      String?
+  city        String?
+  lostValue   Float    @default(0)
+  status      String   @default("RECEIVED")
+  createdAt   DateTime @default(now())
+
+  @@index([orderId])
+}
+
+// ============================================================
+// Sección 8: Costos (para rentabilidad)
+// ============================================================
+
+model CostEntry {
+  id          String   @id @default(cuid())
+  category    String
+  description String
+  amount      Float
+  periodStart DateTime
+  periodEnd   DateTime
+  createdAt   DateTime @default(now())
+
+  @@index([category])
+}
+
+// ============================================================
+// Sección 13: Notificaciones y Alertas
+// ============================================================
+
+model Notification {
+  id          String   @id @default(cuid())
+  userId      String?
+  user        User?    @relation(fields: [userId], references: [id])
+  orderId     String?
+  order       Order?   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  channel     String
+  type        String
+  title       String
+  message     String
+  read        Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model Alert {
+  id          String   @id @default(cuid())
+  type        String
+  severity    String   @default("WARNING")
+  entity      String?
+  message     String
+  resolved    Boolean  @default(false)
+  resolvedAt  DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([type])
+  @@index([resolved])
+  @@index([createdAt])
+}
+
+// ============================================================
+// Sección 14: Auditoría
+// ============================================================
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  userId      String?
+  user        User?    @relation(fields: [userId], references: [id])
+  action      String
+  entity      String
+  entityId    String?
+  ip          String?
+  metadata    String?
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([entity])
+  @@index([createdAt])
+}
+
+// ============================================================
+// Configuración de Integraciones (credenciales)
+// ============================================================
+
+model IntegrationSetting {
+  id          String   @id @default(cuid())
+  provider    String   @unique
+  config      String
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ============================================================
+// Webhook Log — Historial de webhooks recibidos
+// ============================================================
+
+model WebhookLog {
+  id          String   @id @default(cuid())
+  source      String
+  event       String?
+  provider    String?
+  payload     String
+  headers     String?
+  status      String   @default("RECEIVED")
+  result      String?
+  error       String?
+  ipAddress   String?
+  processedAt DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([source])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ============================================================
+// Sección 12: IA Insights
+// ============================================================
+
+model AiInsight {
+  id          String   @id @default(cuid())
+  type        String
+  title       String
+  content     String
+  metadata    String?
+  createdAt   DateTime @default(now())
+
+  @@index([type])
+  @@index([createdAt])
+}

@@ -1,0 +1,2002 @@
+     1→# ESPECIFICACIÓN MAESTRA DE IMPLEMENTACIÓN
+     2→
+     3→## Plataforma Ecommerce Inteligente: Shopify + Wompi + Mastershop + WhatsApp + Impresión + BI
+     4→
+     5→**Versión del documento:** 1.0  
+     6→**Estado:** listo para diseño técnico detallado e implementación iterativa  
+     7→**Tipo de solución:** plataforma interna para una empresa, preparada para conectar múltiples tiendas Shopify  
+     8→**Infraestructura objetivo:** Oracle Cloud Pay As You Go  
+     9→**Presupuesto inicial de infraestructura y servicios:** aproximadamente USD 35/mes  
+    10→**Volumen objetivo inicial:** mínimo 500 pedidos/día en temporada alta  
+    11→**Responsable técnico y de alertas críticas:** Sebastián Montes Giraldo  
+    12→**Correo técnico:** `sebastianmontesg@gmail.com`  
+    13→**WhatsApp técnico:** `+57 314 609 3899`
+    14→
+    15→\---
+    16→
+    17→# 0\. INSTRUCCIONES IMPERATIVAS PARA LA IA DESARROLLADORA
+    18→
+    19→Este documento es la fuente principal de verdad del proyecto. La IA que diseñe o programe la solución deberá cumplir estas reglas:
+    20→
+    21→1. No inventar endpoints, firmas, payloads, códigos de estado, capacidades, precios ni comportamientos de Shopify, Wompi, Mastershop, Meta, Google Ads, TikTok Ads o cualquier tercero.
+    22→2. Cuando una integración no tenga documentación suficiente, crear primero:
+    23→
+    24→   * interfaz de proveedor;
+    25→   * adaptador;
+    26→   * mock;
+    27→   * fixtures;
+    28→   * pruebas de contrato;
+    29→   * feature flag;
+    30→   * modo simulación;
+    31→   * kill switch.
+    32→3. No comenzar escribiendo toda la plataforma. Trabajar por verticales funcionales pequeñas, demostrables y reversibles.
+    33→4. No declarar una tarea como terminada si:
+    34→
+    35→   * no compila;
+    36→   * falla lint;
+    37→   * falla typecheck;
+    38→   * fallan pruebas;
+    39→   * no cumple criterios de aceptación;
+    40→   * no se revisó idempotencia;
+    41→   * no se revisaron errores y observabilidad;
+    42→   * no se actualizó documentación.
+    43→5. Toda decisión no definida deberá registrarse como:
+    44→
+    45→   * `SUPUESTO`;
+    46→   * `DECISIÓN PENDIENTE`;
+    47→   * `RIESGO`;
+    48→   * `BLOQUEANTE`.
+    49→6. Nunca colocar credenciales, tokens, teléfonos, correos operativos o secretos directamente en el código.
+    50→7. Toda operación externa debe ser trazable mediante:
+    51→
+    52→   * `correlationId`;
+    53→   * `causationId`;
+    54→   * `orderId`;
+    55→   * `storeId`;
+    56→   * `provider`;
+    57→   * número de intento;
+    58→   * fecha;
+    59→   * resultado.
+    60→8. Toda operación susceptible de repetición debe ser idempotente.
+    61→9. Toda integración debe tolerar:
+    62→
+    63→   * reintentos;
+    64→   * webhooks duplicados;
+    65→   * webhooks tardíos;
+    66→   * eventos fuera de orden;
+    67→   * timeout;
+    68→   * respuesta perdida;
+    69→   * caída temporal del proveedor.
+    70→10. Las acciones destructivas o irreversibles requieren autorización humana explícita:
+    71→
+    72→    * migraciones destructivas;
+    73→    * eliminación de datos;
+    74→    * cancelación masiva;
+    75→    * cambios de permisos;
+    76→    * despliegue a producción;
+    77→    * rotación de secretos;
+    78→    * cambios en reglas financieras;
+    79→    * activación de automatizaciones reales en Mastershop.
+    80→11. La IA debe revisar documentación oficial vigente antes de implementar cada integración.
+    81→12. Si la documentación real contradice este archivo, no alterar silenciosamente el alcance: registrar la incompatibilidad y proponer una decisión.
+    82→13. Mantener un archivo `PROJECT\_STATUS.md` con:
+    83→
+    84→    * fase actual;
+    85→    * tareas completadas;
+    86→    * tareas en curso;
+    87→    * bloqueos;
+    88→    * riesgos;
+    89→    * pruebas;
+    90→    * deuda técnica;
+    91→    * siguiente paso.
+    92→14. Mantener ADRs en `docs/adr/`.
+    93→15. Mantener contratos de integración versionados en `docs/contracts/`.
+    94→16. Mantener diagramas Mermaid actualizados junto con el código.
+    95→17. No utilizar n8n como sustituto del dominio transaccional ni de la máquina de estados.
+    96→
+    97→\---
+    98→
+    99→# 1\. VISIÓN DEL PRODUCTO
+   100→
+   101→Construir una plataforma empresarial que centralice y automatice el ciclo operativo de ecommerce:
+   102→
+   103→```text
+   104→Shopify
+   105→  → recepción del pedido
+   106→  → validación y normalización
+   107→  → clasificación del método de pago
+   108→  → cobro anticipado del transporte cuando sea contraentrega
+   109→  → confirmación de Wompi
+   110→  → creación del despacho en Mastershop
+   111→  → selección de transportadora
+   112→  → generación de guía
+   113→  → actualización de Shopify
+   114→  → impresión automática local
+   115→  → seguimiento logístico
+   116→  → entrega o devolución
+   117→  → métricas, rentabilidad y auditoría
+   118→```
+   119→
+   120→La plataforma debe eliminar la validación manual previa a la creación de guías. Los errores no deberán perder pedidos ni requerir búsquedas manuales en múltiples sistemas.
+   121→
+   122→\---
+   123→
+   124→# 2\. OBJETIVOS
+   125→
+   126→## 2.1 Objetivos funcionales
+   127→
+   128→* Recibir pedidos de una o múltiples tiendas Shopify.
+   129→* Identificar pago anticipado y pago contraentrega.
+   130→* Cobrar anticipadamente el transporte de todos los pedidos contraentrega.
+   131→* Enviar automáticamente el enlace mediante Meta WhatsApp Cloud API.
+   132→* Procesar la confirmación de Wompi.
+   133→* Crear automáticamente el despacho en Mastershop.
+   134→* Generar, almacenar y enviar la guía a impresión.
+   135→* Actualizar Shopify con etiquetas, notas, fulfillment y tracking.
+   136→* Monitorear estados de Mastershop.
+   137→* Administrar conversaciones de WhatsApp.
+   138→* Ofrecer dashboard operativo, financiero y publicitario.
+   139→* Mantener histórico completo.
+   140→* Permitir conciliación y reproceso seguro.
+   141→* Gestionar integraciones, usuarios, permisos, plantillas, tarifas e impresoras.
+   142→
+   143→## 2.2 Objetivos no funcionales
+   144→
+   145→* Soportar al menos 500 pedidos por día.
+   146→* Procesar cada pedido exactamente una vez a nivel de efecto de negocio, aunque la infraestructura use entrega “al menos una vez”.
+   147→* Recuperarse de errores temporales.
+   148→* Tener tiempo objetivo de recuperación operativa máximo de 35 minutos.
+   149→* Mantener backups nocturnos.
+   150→* Conservar información histórica y auditoría por hasta 10 años según la política definida.
+   151→* Operar inicialmente con presupuesto reducido.
+   152→* Ser desplegable mediante Docker Compose.
+   153→* Mantener seguridad, auditabilidad, extensibilidad y capacidad de observación.
+   154→
+   155→## 2.3 Fuera del alcance inicial
+   156→
+   157→* SaaS multiempresa.
+   158→* Aplicación móvil nativa.
+   159→* Kubernetes.
+   160→* Microservicios independientes.
+   161→* Administración de inventario como fuente de verdad.
+   162→* Checkout propio de tarjetas.
+   163→* ZPL nativo de Mastershop.
+   164→* Automatización de reembolsos.
+   165→* IA predictiva en el MVP.
+   166→* Staging dedicado, salvo que el presupuesto cambie.
+   167→* Correo como canal de pago en la primera versión.
+   168→
+   169→\---
+   170→
+   171→# 3\. PRINCIPIOS ARQUITECTÓNICOS
+   172→
+   173→1. **Monolito modular primero.**
+   174→2. **Workers separados por proceso, mismo repositorio.**
+   175→3. **Base de datos relacional como fuente transaccional.**
+   176→4. **Outbox transaccional para publicación de eventos.**
+   177→5. **Colas para efectos externos.**
+   178→6. **Idempotencia en cada frontera.**
+   179→7. **Adaptadores por proveedor.**
+   180→8. **No depender de n8n para consistencia del negocio.**
+   181→9. **Datos históricos inmutables donde corresponda.**
+   182→10. **Observabilidad desde el primer vertical.**
+   183→11. **Automatización con controles de seguridad.**
+   184→12. **Costos mínimos, posibilidad de escalar después.**
+   185→
+   186→\---
+   187→
+   188→# 4\. STACK TECNOLÓGICO OBJETIVO
+   189→
+   190→## 4.1 Monorepo
+   191→
+   192→* `pnpm workspaces`
+   193→* Turborepo
+   194→* TypeScript con modo estricto
+   195→* ESLint
+   196→* Prettier
+   197→* Conventional Commits
+   198→* Changesets o versionado equivalente cuando sea necesario
+   199→
+   200→## 4.2 Frontend
+   201→
+   202→* Next.js 15
+   203→* React 19
+   204→* TypeScript
+   205→* Tailwind CSS
+   206→* shadcn/ui
+   207→* Radix UI
+   208→* TanStack Query
+   209→* Zustand solo para estado local/global de interfaz que no sea estado de servidor
+   210→* Recharts para dashboards
+   211→* React Hook Form
+   212→* Zod
+   213→* Accesibilidad WCAG 2.1 AA como objetivo
+   214→
+   215→## 4.3 Backend
+   216→
+   217→* Node.js en versión LTS compatible, fijada en `.nvmrc` y `package.json`
+   218→* NestJS
+   219→* REST API
+   220→* WebSockets o Server-Sent Events para actualizaciones operativas
+   221→* OpenAPI/Swagger
+   222→* Prisma ORM
+   223→* PostgreSQL
+   224→* Redis
+   225→* BullMQ
+   226→* Zod y/o class-validator en bordes de entrada
+   227→* Pino para logs estructurados
+   228→
+   229→## 4.4 Automatización
+   230→
+   231→* n8n self-hosted
+   232→* Debe utilizarse para:
+   233→
+   234→  * reportes no críticos;
+   235→  * notificaciones administrativas secundarias;
+   236→  * sincronizaciones auxiliares;
+   237→  * procesos programados no transaccionales;
+   238→  * integraciones experimentales.
+   239→* No debe utilizarse como dueño de:
+   240→
+   241→  * máquina de estados;
+   242→  * confirmación de pagos;
+   243→  * creación idempotente de guías;
+   244→  * conciliación principal;
+   245→  * seguridad;
+   246→  * autorización.
+   247→
+   248→## 4.5 Almacenamiento
+   249→
+   250→* PostgreSQL para datos estructurados.
+   251→* Redis para cache, locks y BullMQ.
+   252→* Oracle Object Storage o almacenamiento S3-compatible para:
+   253→
+   254→  * guías;
+   255→  * facturas;
+   256→  * picking lists;
+   257→  * exports;
+   258→  * evidencias.
+   259→* En desarrollo local: MinIO.
+   260→
+   261→## 4.6 Pruebas
+   262→
+   263→* Vitest o Jest para pruebas unitarias.
+   264→* Supertest para API.
+   265→* Testcontainers para PostgreSQL y Redis.
+   266→* Playwright para E2E.
+   267→* Pact o contratos JSON Schema para integraciones.
+   268→* k6 para carga.
+   269→* MSW o mocks controlados para frontend.
+   270→
+   271→## 4.7 Observabilidad
+   272→
+   273→* OpenTelemetry.
+   274→* Sentry para errores, si el presupuesto lo permite.
+   275→* Prometheus + Grafana o stack ligero equivalente.
+   276→* Loki o logs Docker con rotación en fase inicial.
+   277→* Health checks.
+   278→* Bull Board protegido.
+   279→* Uptime monitor externo de bajo costo o gratuito.
+   280→
+   281→\---
+   282→
+   283→# 5\. ESTRUCTURA DEL MONOREPO
+   284→
+   285→```text
+   286→/
+   287→├── apps/
+   288→│   ├── web/                         # Next.js
+   289→│   ├── api/                         # NestJS HTTP API
+   290→│   ├── worker-orders/               # workers de pedidos y Shopify
+   291→│   ├── worker-payments/             # Wompi y conciliación
+   292→│   ├── worker-logistics/            # Mastershop y tracking
+   293→│   ├── worker-messaging/             # WhatsApp
+   294→│   ├── worker-printing/             # trabajos de impresión
+   295→│   └── print-agent/                 # agente Windows
+   296→├── packages/
+   297→│   ├── domain/                      # entidades, value objects, eventos
+   298→│   ├── application/                 # casos de uso
+   299→│   ├── database/                    # Prisma, migraciones, seeds
+   300→│   ├── contracts/                   # DTOs, JSON Schemas, OpenAPI
+   301→│   ├── integrations/
+   302→│   │   ├── shopify/
+   303→│   │   ├── wompi/
+   304→│   │   ├── mastershop/
+   305→│   │   ├── whatsapp/
+   306→│   │   ├── meta-ads/
+   307→│   │   ├── google-ads/
+   308→│   │   └── tiktok-ads/
+   309→│   ├── queue/
+   310→│   ├── observability/
+   311→│   ├── security/
+   312→│   ├── ui/
+   313→│   └── config/
+   314→├── workflows/
+   315→│   └── n8n/
+   316→├── docs/
+   317→│   ├── adr/
+   318→│   ├── architecture/
+   319→│   ├── contracts/
+   320→│   ├── runbooks/
+   321→│   ├── security/
+   322→│   └── testing/
+   323→├── infra/
+   324→│   ├── docker/
+   325→│   ├── oracle/
+   326→│   ├── nginx/
+   327→│   ├── backup/
+   328→│   └── monitoring/
+   329→├── scripts/
+   330→├── .github/workflows/
+   331→├── docker-compose.yml
+   332→├── docker-compose.prod.yml
+   333→├── PROJECT\_STATUS.md
+   334→└── README.md
+   335→```
+   336→
+   337→\---
+   338→
+   339→# 6\. ARQUITECTURA C4
+   340→
+   341→## 6.1 Diagrama de contexto
+   342→
+   343→```mermaid
+   344→C4Context
+   345→title Contexto — Plataforma Ecommerce Inteligente
+   346→
+   347→Person(owner, "Dueño/Gerencia", "Consulta métricas, rentabilidad y alertas")
+   348→Person(operator, "Operador interno", "Gestiona pedidos, atención, bodega y finanzas")
+   349→Person(customer, "Cliente final", "Compra y recibe mensajes de WhatsApp")
+   350→Person(tech, "Responsable técnico", "Administra infraestructura e incidentes")
+   351→
+   352→System(platform, "Plataforma Ecommerce Inteligente", "Automatiza pedidos, pagos, logística, impresión y BI")
+   353→
+   354→System\_Ext(shopify, "Shopify", "Tiendas, pedidos, clientes e inventario")
+   355→System\_Ext(wompi, "Wompi", "Links y confirmación de pago")
+   356→System\_Ext(mastershop, "Mastershop", "Tarifas, transportadoras, guías y tracking")
+   357→System\_Ext(meta, "Meta WhatsApp Cloud API", "Mensajería bidireccional")
+   358→System\_Ext(adPlatforms, "Meta Ads / Google Ads / TikTok Ads", "Datos de publicidad y atribución")
+   359→System\_Ext(printer, "Agente de impresión Windows", "Imprime guías, facturas y picking lists")
+   360→
+   361→Rel(customer, shopify, "Realiza compra")
+   362→Rel(shopify, platform, "Webhooks/API")
+   363→Rel(platform, wompi, "Crea link y consulta pago")
+   364→Rel(wompi, platform, "Webhook de transacción")
+   365→Rel(platform, mastershop, "Crea despacho y consulta estados")
+   366→Rel(mastershop, platform, "API/webhooks")
+   367→Rel(platform, meta, "Envía y recibe mensajes")
+   368→Rel(platform, adPlatforms, "Consulta campañas y costos")
+   369→Rel(platform, printer, "Entrega trabajos de impresión")
+   370→Rel(owner, platform, "Consulta dashboard")
+   371→Rel(operator, platform, "Opera módulos")
+   372→Rel(tech, platform, "Administra y recibe alertas")
+   373→```
+   374→
+   375→## 6.2 Diagrama de contenedores
+   376→
+   377→```mermaid
+   378→C4Container
+   379→title Contenedores — Plataforma Ecommerce Inteligente
+   380→
+   381→Person(user, "Usuario interno")
+   382→Person(customer, "Cliente")
+   383→System\_Ext(shopify, "Shopify")
+   384→System\_Ext(wompi, "Wompi")
+   385→System\_Ext(mastershop, "Mastershop")
+   386→System\_Ext(meta, "Meta WhatsApp")
+   387→System\_Ext(ads, "Plataformas Ads")
+   388→System\_Ext(printer, "Agente Windows")
+   389→
+   390→System\_Boundary(system, "Oracle Cloud / Plataforma") {
+   391→    Container(web, "Web Admin", "Next.js", "Dashboard y operación")
+   392→    Container(api, "API", "NestJS", "Autenticación, casos de uso y consultas")
+   393→    Container(workers, "Workers", "NestJS/BullMQ", "Procesamiento asíncrono")
+   394→    ContainerDb(db, "PostgreSQL", "PostgreSQL", "Fuente transaccional e histórica")
+   395→    ContainerDb(redis, "Redis", "Redis", "Colas, locks y cache")
+   396→    Container(object, "Object Storage", "S3-compatible", "PDFs y exports")
+   397→    Container(n8n, "n8n", "n8n", "Automatizaciones auxiliares")
+   398→    Container(proxy, "Reverse proxy", "Caddy/Nginx", "TLS y routing")
+   399→}
+   400→
+   401→Rel(user, web, "HTTPS")
+   402→Rel(web, api, "REST/SSE")
+   403→Rel(api, db, "SQL")
+   404→Rel(api, redis, "Jobs/cache")
+   405→Rel(workers, redis, "Consume jobs")
+   406→Rel(workers, db, "Transacciones")
+   407→Rel(workers, object, "Guarda documentos")
+   408→Rel(shopify, api, "Webhooks")
+   409→Rel(workers, shopify, "Admin API")
+   410→Rel(workers, wompi, "API")
+   411→Rel(wompi, api, "Webhooks")
+   412→Rel(workers, mastershop, "API")
+   413→Rel(mastershop, api, "Webhooks")
+   414→Rel(workers, meta, "Cloud API")
+   415→Rel(meta, api, "Webhooks")
+   416→Rel(workers, ads, "APIs")
+   417→Rel(workers, printer, "Canal seguro de trabajos")
+   418→Rel(n8n, api, "API interna controlada")
+   419→Rel(proxy, web, "Route")
+   420→Rel(proxy, api, "Route")
+   421→Rel(proxy, n8n, "Route protegido")
+   422→```
+   423→
+   424→## 6.3 Componentes del backend
+   425→
+   426→```mermaid
+   427→flowchart LR
+   428→    Controllers\[Controllers / Webhooks]
+   429→    Auth\[Auth \& RBAC]
+   430→    Orders\[Orders Module]
+   431→    Payments\[Payments Module]
+   432→    Logistics\[Logistics Module]
+   433→    Messaging\[Messaging Module]
+   434→    Printing\[Printing Module]
+   435→    Analytics\[Analytics Module]
+   436→    Integrations\[Integration Registry]
+   437→    Audit\[Audit \& Observability]
+   438→    Outbox\[Transactional Outbox]
+   439→    Queues\[BullMQ]
+   440→    DB\[(PostgreSQL)]
+   441→    Redis\[(Redis)]
+   442→
+   443→    Controllers --> Auth
+   444→    Controllers --> Orders
+   445→    Orders --> Payments
+   446→    Orders --> Logistics
+   447→    Orders --> Messaging
+   448→    Logistics --> Printing
+   449→    Orders --> Analytics
+   450→    Payments --> Integrations
+   451→    Logistics --> Integrations
+   452→    Messaging --> Integrations
+   453→    Printing --> Integrations
+   454→    Orders --> Outbox
+   455→    Payments --> Outbox
+   456→    Logistics --> Outbox
+   457→    Outbox --> Queues
+   458→    Queues --> Redis
+   459→    Orders --> DB
+   460→    Payments --> DB
+   461→    Logistics --> DB
+   462→    Messaging --> DB
+   463→    Printing --> DB
+   464→    Audit --> DB
+   465→```
+   466→
+   467→\---
+   468→
+   469→# 7\. RESPONSABILIDAD DE CADA MÓDULO
+   470→
+   471→## 7.1 Identity \& Access
+   472→
+   473→* usuarios;
+   474→* invitaciones;
+   475→* recuperación de contraseña;
+   476→* sesiones;
+   477→* roles;
+   478→* permisos;
+   479→* auditoría de acceso.
+   480→
+   481→## 7.2 Stores \& Integrations
+   482→
+   483→* tiendas Shopify;
+   484→* credenciales cifradas;
+   485→* configuración de gateways;
+   486→* configuración de tarifas;
+   487→* estado de conexiones;
+   488→* pruebas de conexión;
+   489→* rotación de secretos;
+   490→* feature flags.
+   491→
+   492→## 7.3 Orders
+   493→
+   494→* recepción;
+   495→* snapshot;
+   496→* validación;
+   497→* clasificación;
+   498→* máquina de estados;
+   499→* eventos;
+   500→* excepciones;
+   501→* conciliación.
+   502→
+   503→## 7.4 Payments
+   504→
+   505→* intentos;
+   506→* links;
+   507→* webhooks;
+   508→* conciliación;
+   509→* pagos duplicados;
+   510→* confirmación manual;
+   511→* comisiones.
+   512→
+   513→## 7.5 Logistics
+   514→
+   515→* tarifa;
+   516→* creación en Mastershop;
+   517→* transportadora;
+   518→* guía;
+   519→* tracking;
+   520→* novedades;
+   521→* entrega;
+   522→* devolución.
+   523→
+   524→## 7.6 Messaging
+   525→
+   526→* plantillas;
+   527→* mensajes salientes;
+   528→* webhooks entrantes;
+   529→* bandeja;
+   530→* estados;
+   531→* recordatorios;
+   532→* agentes.
+   533→
+   534→## 7.7 Printing
+   535→
+   536→* impresoras;
+   537→* agente;
+   538→* heartbeat;
+   539→* trabajos;
+   540→* reintentos;
+   541→* evidencias;
+   542→* reimpresión.
+   543→
+   544→## 7.8 Analytics
+   545→
+   546→* snapshots;
+   547→* ventas reconocidas;
+   548→* rentabilidad;
+   549→* publicidad;
+   550→* atribución;
+   551→* comparaciones;
+   552→* exportaciones.
+   553→
+   554→## 7.9 Audit \& Operations
+   555→
+   556→* logs;
+   557→* auditoría;
+   558→* incidentes;
+   559→* jobs fallidos;
+   560→* DLQ;
+   561→* reprocesos;
+   562→* alertas;
+   563→* backups.
+   564→
+   565→\---
+   566→
+   567→# 8\. FLUJOS PRINCIPALES
+   568→
+   569→## 8.1 Pedido pagado anticipadamente
+   570→
+   571→```mermaid
+   572→sequenceDiagram
+   573→    autonumber
+   574→    participant S as Shopify
+   575→    participant API as API Webhook
+   576→    participant DB as PostgreSQL
+   577→    participant Q as BullMQ
+   578→    participant M as Mastershop
+   579→    participant OS as Object Storage
+   580→    participant P as Print Agent
+   581→
+   582→    S->>API: orders/create o evento relevante
+   583→    API->>API: validar HMAC, timestamp e idempotencia
+   584→    API->>DB: guardar webhook y pedido mínimo
+   585→    API->>Q: enqueue sync-order
+   586→    API-->>S: 200 rápido
+   587→
+   588→    Q->>S: consultar pedido completo
+   589→    S-->>Q: datos del pedido
+   590→    Q->>DB: snapshot y clasificación PAGADO
+   591→    Q->>Q: normalizar dirección y teléfono
+   592→    Q->>M: crear pedido con idempotency key
+   593→    M-->>Q: orden, transportadora y guía
+   594→    Q->>OS: guardar PDF
+   595→    Q->>DB: registrar guía y tracking
+   596→    Q->>S: actualizar tags/notas/fulfillment/tracking
+   597→    Q->>P: crear trabajo de impresión
+   598→    P-->>Q: ACK/resultado
+   599→    Q->>DB: completar evento y auditoría
+   600→```
+   601→
+   602→## 8.2 Pedido contraentrega
+   603→
+   604→```mermaid
+   605→sequenceDiagram
+   606→    autonumber
+   607→    participant S as Shopify
+   608→    participant API as API
+   609→    participant DB as PostgreSQL
+   610→    participant Q as BullMQ
+   611→    participant W as Wompi
+   612→    participant WA as WhatsApp
+   613→    participant M as Mastershop
+   614→    participant P as Impresora
+   615→
+   616→    S->>API: webhook de pedido
+   617→    API->>DB: guardar evento idempotente
+   618→    API->>Q: procesar pedido
+   619→    API-->>S: 200
+   620→
+   621→    Q->>S: consultar pedido
+   622→    Q->>DB: guardar snapshot
+   623→    Q->>Q: clasificar CONTRAENTREGA
+   624→    Q->>Q: resolver tarifa
+   625→    Q->>W: crear link COP
+   626→    W-->>Q: checkoutUrl/reference
+   627→    Q->>DB: guardar intento
+   628→    Q->>WA: enviar plantilla con link
+   629→    WA-->>Q: messageId
+   630→    Q->>DB: estado PENDIENTE\_PAGO\_TRANSPORTE
+   631→
+   632→    Note over Q,WA: hora 8 y hora 16: recordatorios
+   633→
+   634→    W->>API: webhook de transacción
+   635→    API->>API: validar firma e idempotencia
+   636→    API->>DB: registrar evento
+   637→    API->>Q: confirmar pago
+   638→    API-->>W: 200
+   639→
+   640→    Q->>W: consultar estado authoritative
+   641→    W-->>Q: APPROVED
+   642→    Q->>DB: pago confirmado
+   643→    Q->>S: tags/notas
+   644→    Q->>M: crear orden
+   645→    M-->>Q: guía/transportadora/tracking
+   646→    Q->>S: fulfillment/tracking
+   647→    Q->>P: imprimir
+   648→    Q->>WA: confirmación y guía
+   649→```
+   650→
+   651→## 8.3 Vencimiento de pago
+   652→
+   653→```mermaid
+   654→sequenceDiagram
+   655→    participant Scheduler as Scheduler
+   656→    participant DB as PostgreSQL
+   657→    participant Q as Worker
+   658→    participant WA as WhatsApp
+   659→    participant S as Shopify
+   660→
+   661→    Scheduler->>DB: buscar pagos pendientes vencibles
+   662→    Scheduler->>Q: jobs de recordatorio/vencimiento
+   663→    Q->>WA: recordatorio hora 8
+   664→    Q->>WA: recordatorio hora 16
+   665→    Q->>DB: al cumplir 24h, ABANDONO\_PAGO\_TRANSPORTE
+   666→    alt configuración cancelar
+   667→        Q->>S: cancelar pedido
+   668→    else solo marcar
+   669→        Q->>S: añadir etiqueta/nota de abandono
+   670→    end
+   671→```
+   672→
+   673→## 8.4 Caída de Mastershop
+   674→
+   675→```mermaid
+   676→flowchart TD
+   677→    A\[Job crear guía] --> B{Mastershop responde}
+   678→    B -->|Sí| C\[Guardar orden y guía]
+   679→    B -->|Timeout/5xx| D\[Reintento exponencial]
+   680→    D --> E{Intentos agotados}
+   681→    E -->|No| A
+   682→    E -->|Sí| F\[Dead-letter queue]
+   683→    F --> G\[Alerta técnica y dueños]
+   684→    F --> H\[Pedido ERROR\_MASTERSHOP]
+   685→    H --> I\[Reproceso manual seguro]
+   686→    I --> J{Consultar si ya existe orden}
+   687→    J -->|Existe| C
+   688→    J -->|No existe| A
+   689→```
+   690→
+   691→## 8.5 Impresión
+   692→
+   693→```mermaid
+   694→sequenceDiagram
+   695→    participant API as Plataforma
+   696→    participant DB as PostgreSQL
+   697→    participant Agent as Agente Windows
+   698→    participant Spool as Cola Windows
+   699→    participant Printer as Impresora
+   700→
+   701→    Agent->>API: heartbeat y capacidades
+   702→    API->>DB: estado ONLINE
+   703→
+   704→    API->>DB: crear print\_job PENDING
+   705→    Agent->>API: long-poll/WebSocket por trabajos
+   706→    API-->>Agent: documento + checksum
+   707→    Agent->>Agent: verificar checksum y configuración
+   708→    Agent->>Spool: enviar documento
+   709→    Spool->>Printer: imprimir
+   710→    Agent->>API: ACK SENT\_TO\_SPOOL
+   711→    Agent->>API: resultado cuando sea detectable
+   712→    API->>DB: historial y evidencia
+   713→```
+   714→
+   715→\---
+   716→
+   717→# 9\. MÁQUINA DE ESTADOS DEL PEDIDO
+   718→
+   719→## 9.1 Estados internos
+   720→
+   721→```text
+   722→RECEIVED
+   723→VALIDATING
+   724→INVALID\_DATA
+   725→READY\_FOR\_PAYMENT\_CLASSIFICATION
+   726→PENDING\_TRANSPORT\_PAYMENT
+   727→TRANSPORT\_PAYMENT\_REMINDER\_1
+   728→TRANSPORT\_PAYMENT\_REMINDER\_2
+   729→TRANSPORT\_PAYMENT\_CONFIRMED
+   730→TRANSPORT\_PAYMENT\_EXPIRED
+   731→ABANDONO\_PAGO\_TRANSPORTE
+   732→READY\_FOR\_LOGISTICS
+   733→CREATING\_LOGISTICS\_ORDER
+   734→ERROR\_MASTERSHOP
+   735→GUIDE\_GENERATED
+   736→PRINT\_PENDING
+   737→PRINTED
+   738→POR\_ALISTAR
+   739→POR\_RECOLECTAR
+   740→RECOLECTADO
+   741→EN\_TRANSITO
+   742→NOVEDAD\_LOGISTICA
+   743→ENTREGADO
+   744→DEVUELTO
+   745→CANCELADO
+   746→MANUAL\_REVIEW
+   747→```
+   748→
+   749→## 9.2 Diagrama
+   750→
+   751→```mermaid
+   752→stateDiagram-v2
+   753→    \[\*] --> RECEIVED
+   754→    RECEIVED --> VALIDATING
+   755→    VALIDATING --> INVALID\_DATA: datos insuficientes
+   756→    INVALID\_DATA --> VALIDATING: corrección/reproceso
+   757→    VALIDATING --> READY\_FOR\_PAYMENT\_CLASSIFICATION
+   758→
+   759→    READY\_FOR\_PAYMENT\_CLASSIFICATION --> PENDING\_TRANSPORT\_PAYMENT: contraentrega
+   760→    READY\_FOR\_PAYMENT\_CLASSIFICATION --> READY\_FOR\_LOGISTICS: pago anticipado
+   761→
+   762→    PENDING\_TRANSPORT\_PAYMENT --> TRANSPORT\_PAYMENT\_REMINDER\_1: 8h
+   763→    TRANSPORT\_PAYMENT\_REMINDER\_1 --> TRANSPORT\_PAYMENT\_REMINDER\_2: 16h
+   764→    PENDING\_TRANSPORT\_PAYMENT --> TRANSPORT\_PAYMENT\_CONFIRMED: Wompi approved
+   765→    TRANSPORT\_PAYMENT\_REMINDER\_1 --> TRANSPORT\_PAYMENT\_CONFIRMED
+   766→    TRANSPORT\_PAYMENT\_REMINDER\_2 --> TRANSPORT\_PAYMENT\_CONFIRMED
+   767→    TRANSPORT\_PAYMENT\_REMINDER\_2 --> TRANSPORT\_PAYMENT\_EXPIRED: 24h
+   768→    TRANSPORT\_PAYMENT\_EXPIRED --> ABANDONO\_PAGO\_TRANSPORTE
+   769→
+   770→    TRANSPORT\_PAYMENT\_CONFIRMED --> READY\_FOR\_LOGISTICS
+   771→    READY\_FOR\_LOGISTICS --> CREATING\_LOGISTICS\_ORDER
+   772→    CREATING\_LOGISTICS\_ORDER --> ERROR\_MASTERSHOP: error agotado
+   773→    ERROR\_MASTERSHOP --> CREATING\_LOGISTICS\_ORDER: reproceso
+   774→    CREATING\_LOGISTICS\_ORDER --> GUIDE\_GENERATED
+   775→    GUIDE\_GENERATED --> PRINT\_PENDING
+   776→    PRINT\_PENDING --> PRINTED
+   777→
+   778→    GUIDE\_GENERATED --> POR\_ALISTAR
+   779→    POR\_ALISTAR --> POR\_RECOLECTAR
+   780→    POR\_RECOLECTAR --> RECOLECTADO
+   781→    RECOLECTADO --> EN\_TRANSITO
+   782→    EN\_TRANSITO --> NOVEDAD\_LOGISTICA
+   783→    NOVEDAD\_LOGISTICA --> EN\_TRANSITO
+   784→    EN\_TRANSITO --> ENTREGADO
+   785→    NOVEDAD\_LOGISTICA --> DEVUELTO
+   786→
+   787→    RECEIVED --> CANCELADO
+   788→    PENDING\_TRANSPORT\_PAYMENT --> CANCELADO
+   789→    READY\_FOR\_LOGISTICS --> CANCELADO
+   790→```
+   791→
+   792→## 9.3 Reglas
+   793→
+   794→* Ningún estado se cambia directamente desde el frontend.
+   795→* El frontend invoca casos de uso autorizados.
+   796→* Cada transición:
+   797→
+   798→  * valida estado origen;
+   799→  * valida permiso;
+   800→  * registra actor;
+   801→  * registra causa;
+   802→  * emite evento;
+   803→  * actualiza `order\_state\_history`.
+   804→* `ENTREGADO` define venta reconocida.
+   805→* `EN\_TRANSITO` define pedido enviado.
+   806→* `DEVUELTO` define devolución.
+   807→* Los eventos tardíos no pueden retroceder el estado sin una regla explícita.
+   808→* Los mapeos de Mastershop son configurables.
+   809→
+   810→\---
+   811→
+   812→# 10\. MODELO DE DATOS
+   813→
+   814→## 10.1 Convenciones
+   815→
+   816→* IDs internos: UUID.
+   817→* IDs externos: columnas separadas.
+   818→* `created\_at`, `updated\_at`.
+   819→* `deleted\_at` solo donde el borrado lógico sea necesario.
+   820→* Timestamps en UTC.
+   821→* Dinero en unidades menores: centavos.
+   822→* Moneda ISO 4217.
+   823→* Teléfono E.164.
+   824→* Payloads JSONB con redacción de secretos.
+   825→* Índices por claves externas, estado y fechas.
+   826→* Constraints únicos para idempotencia.
+   827→
+   828→## 10.2 Diagrama ER simplificado
+   829→
+   830→```mermaid
+   831→erDiagram
+   832→    ORGANIZATION ||--o{ STORE : owns
+   833→    STORE ||--o{ INTEGRATION\_CONNECTION : has
+   834→    STORE ||--o{ ORDER : receives
+   835→    CUSTOMER ||--o{ ORDER : places
+   836→    ORDER ||--|{ ORDER\_ITEM : contains
+   837→    ORDER ||--o{ ORDER\_STATE\_HISTORY : transitions
+   838→    ORDER ||--o{ PAYMENT\_INTENT : has
+   839→    PAYMENT\_INTENT ||--o{ PAYMENT\_TRANSACTION : records
+   840→    ORDER ||--o{ LOGISTICS\_ORDER : has
+   841→    LOGISTICS\_ORDER ||--o{ SHIPMENT : creates
+   842→    SHIPMENT ||--o{ TRACKING\_EVENT : receives
+   843→    SHIPMENT ||--o{ DOCUMENT : has
+   844→    DOCUMENT ||--o{ PRINT\_JOB : printed\_as
+   845→    PRINTER ||--o{ PRINT\_JOB : executes
+   846→    PRINT\_AGENT ||--o{ PRINTER : exposes
+   847→    CUSTOMER ||--o{ CONVERSATION : has
+   848→    CONVERSATION ||--o{ MESSAGE : contains
+   849→    ORDER ||--o{ MESSAGE : relates
+   850→    ORDER ||--o{ AD\_ATTRIBUTION : attributed
+   851→    AD\_CAMPAIGN ||--o{ AD\_ATTRIBUTION : contributes
+   852→    ORDER ||--o{ PROFIT\_SNAPSHOT : measures
+   853→    WEBHOOK\_EVENT ||--o{ JOB\_EXECUTION : triggers
+   854→    USER ||--o{ AUDIT\_LOG : performs
+   855→    ROLE ||--o{ USER\_ROLE : assigned
+   856→    USER ||--o{ USER\_ROLE : has
+   857→    ROLE ||--o{ ROLE\_PERMISSION : grants
+   858→    PERMISSION ||--o{ ROLE\_PERMISSION : included
+   859→```
+   860→
+   861→## 10.3 Tablas principales
+   862→
+   863→### organization
+   864→
+   865→* `id`
+   866→* `name`
+   867→* `timezone`
+   868→* `default\_currency`
+   869→* `created\_at`
+   870→* `updated\_at`
+   871→
+   872→### stores
+   873→
+   874→* `id`
+   875→* `organization\_id`
+   876→* `name`
+   877→* `shopify\_shop\_domain`
+   878→* `status`
+   879→* `timezone`
+   880→* `currency`
+   881→* `settings\_json`
+   882→* `created\_at`
+   883→* `updated\_at`
+   884→
+   885→Unique:
+   886→
+   887→* `shopify\_shop\_domain`
+   888→
+   889→### integration\_connections
+   890→
+   891→* `id`
+   892→* `store\_id` nullable para integraciones globales
+   893→* `provider`
+   894→* `display\_name`
+   895→* `status`
+   896→* `encrypted\_credentials`
+   897→* `config\_json`
+   898→* `last\_health\_check\_at`
+   899→* `last\_health\_status`
+   900→* `created\_at`
+   901→* `updated\_at`
+   902→
+   903→Providers:
+   904→
+   905→* `SHOPIFY`
+   906→* `WOMPI`
+   907→* `MASTERSHOP`
+   908→* `WHATSAPP`
+   909→* `META\_ADS`
+   910→* `GOOGLE\_ADS`
+   911→* `TIKTOK\_ADS`
+   912→* `EMAIL`
+   913→* `OBJECT\_STORAGE`
+   914→
+   915→### customers
+   916→
+   917→* `id`
+   918→* `store\_id`
+   919→* `shopify\_customer\_id`
+   920→* `first\_name`
+   921→* `last\_name`
+   922→* `email`
+   923→* `phone\_e164`
+   924→* `document\_type`
+   925→* `document\_number\_encrypted`
+   926→* `marketing\_consent`
+   927→* `data\_processing\_consent`
+   928→* `created\_at`
+   929→* `updated\_at`
+   930→
+   931→Índices:
+   932→
+   933→* `(store\_id, shopify\_customer\_id)`
+   934→* `(store\_id, phone\_e164)`
+   935→* `(store\_id, email)`
+   936→
+   937→### customer\_addresses
+   938→
+   939→* `id`
+   940→* `customer\_id`
+   941→* `shopify\_address\_id`
+   942→* `address1`
+   943→* `address2`
+   944→* `city`
+   945→* `department`
+   946→* `postal\_code`
+   947→* `country\_code`
+   948→* `normalized\_address`
+   949→* `validation\_status`
+   950→* `validation\_details\_json`
+   951→* `created\_at`
+   952→
+   953→### orders
+   954→
+   955→* `id`
+   956→* `store\_id`
+   957→* `customer\_id`
+   958→* `shopify\_order\_id`
+   959→* `shopify\_order\_name`
+   960→* `shopify\_checkout\_id`
+   961→* `payment\_mode`
+   962→* `current\_state`
+   963→* `currency`
+   964→* `subtotal\_amount`
+   965→* `discount\_amount`
+   966→* `tax\_amount`
+   967→* `total\_amount`
+   968→* `transport\_charge\_amount`
+   969→* `cod\_collect\_amount`
+   970→* `recognized\_sale\_at`
+   971→* `sent\_at`
+   972→* `delivered\_at`
+   973→* `returned\_at`
+   974→* `cancelled\_at`
+   975→* `source\_created\_at`
+   976→* `raw\_snapshot\_json`
+   977→* `version`
+   978→* `created\_at`
+   979→* `updated\_at`
+   980→
+   981→Unique:
+   982→
+   983→* `(store\_id, shopify\_order\_id)`
+   984→
+   985→### order\_items
+   986→
+   987→* `id`
+   988→* `order\_id`
+   989→* `shopify\_line\_item\_id`
+   990→* `shopify\_product\_id`
+   991→* `shopify\_variant\_id`
+   992→* `mastershop\_product\_id`
+   993→* `sku`
+   994→* `product\_name`
+   995→* `variant\_name`
+   996→* `quantity`
+   997→* `unit\_price\_amount`
+   998→* `unit\_cost\_amount`
+   999→* `total\_price\_amount`
+  1000→* `snapshot\_json`
+  1001→* `created\_at`
+  1002→
+  1003→### order\_state\_history
+  1004→
+  1005→* `id`
+  1006→* `order\_id`
+  1007→* `from\_state`
+  1008→* `to\_state`
+  1009→* `trigger\_type`
+  1010→* `trigger\_id`
+  1011→* `actor\_user\_id`
+  1012→* `reason`
+  1013→* `metadata\_json`
+  1014→* `created\_at`
+  1015→
+  1016→### transport\_rate\_rules
+  1017→
+  1018→* `id`
+  1019→* `store\_id` nullable
+  1020→* `city`
+  1021→* `department`
+  1022→* `product\_id`
+  1023→* `priority`
+  1024→* `amount`
+  1025→* `currency`
+  1026→* `active`
+  1027→* `valid\_from`
+  1028→* `valid\_to`
+  1029→* `created\_at`
+  1030→* `updated\_at`
+  1031→
+  1032→### payment\_intents
+  1033→
+  1034→* `id`
+  1035→* `order\_id`
+  1036→* `provider`
+  1037→* `external\_reference`
+  1038→* `provider\_checkout\_id`
+  1039→* `checkout\_url`
+  1040→* `amount`
+  1041→* `currency`
+  1042→* `status`
+  1043→* `expires\_at`
+  1044→* `attempt\_number`
+  1045→* `idempotency\_key`
+  1046→* `created\_at`
+  1047→* `updated\_at`
+  1048→
+  1049→Unique:
+  1050→
+  1051→* `idempotency\_key`
+  1052→* `(provider, external\_reference, attempt\_number)`
+  1053→
+  1054→### payment\_transactions
+  1055→
+  1056→* `id`
+  1057→* `payment\_intent\_id`
+  1058→* `provider\_transaction\_id`
+  1059→* `status`
+  1060→* `amount`
+  1061→* `currency`
+  1062→* `signature\_valid`
+  1063→* `provider\_created\_at`
+  1064→* `raw\_payload\_json`
+  1065→* `created\_at`
+  1066→
+  1067→Unique:
+  1068→
+  1069→* `(provider\_transaction\_id)`
+  1070→
+  1071→### payment\_reconciliations
+  1072→
+  1073→* `id`
+  1074→* `reconciliation\_date`
+  1075→* `provider`
+  1076→* `status`
+  1077→* `matched\_count`
+  1078→* `mismatch\_count`
+  1079→* `summary\_json`
+  1080→* `started\_at`
+  1081→* `completed\_at`
+  1082→
+  1083→### logistics\_orders
+  1084→
+  1085→* `id`
+  1086→* `order\_id`
+  1087→* `provider`
+  1088→* `external\_order\_id`
+  1089→* `status`
+  1090→* `selected\_carrier`
+  1091→* `selection\_rule`
+  1092→* `shipping\_cost\_amount`
+  1093→* `declared\_value\_amount`
+  1094→* `collect\_amount`
+  1095→* `idempotency\_key`
+  1096→* `request\_snapshot\_json`
+  1097→* `response\_snapshot\_json`
+  1098→* `created\_at`
+  1099→* `updated\_at`
+  1100→
+  1101→Unique:
+  1102→
+  1103→* `idempotency\_key`
+  1104→* `(provider, external\_order\_id)`
+  1105→
+  1106→### shipments
+  1107→
+  1108→* `id`
+  1109→* `logistics\_order\_id`
+  1110→* `tracking\_number`
+  1111→* `carrier\_code`
+  1112→* `carrier\_name`
+  1113→* `status`
+  1114→* `label\_document\_id`
+  1115→* `source\_created\_at`
+  1116→* `created\_at`
+  1117→* `updated\_at`
+  1118→
+  1119→Unique:
+  1120→
+  1121→* `(carrier\_code, tracking\_number)`
+  1122→
+  1123→### tracking\_events
+  1124→
+  1125→* `id`
+  1126→* `shipment\_id`
+  1127→* `provider\_event\_id`
+  1128→* `provider\_status`
+  1129→* `normalized\_status`
+  1130→* `description`
+  1131→* `location`
+  1132→* `event\_at`
+  1133→* `raw\_payload\_json`
+  1134→* `created\_at`
+  1135→
+  1136→Unique:
+  1137→
+  1138→* `(shipment\_id, provider\_event\_id)`
+  1139→
+  1140→### documents
+  1141→
+  1142→* `id`
+  1143→* `order\_id`
+  1144→* `shipment\_id`
+  1145→* `type`
+  1146→* `storage\_key`
+  1147→* `mime\_type`
+  1148→* `size\_bytes`
+  1149→* `checksum\_sha256`
+  1150→* `version`
+  1151→* `created\_at`
+  1152→
+  1153→Tipos:
+  1154→
+  1155→* `SHIPPING\_LABEL`
+  1156→* `INVOICE`
+  1157→* `PICKING\_LIST`
+  1158→* `REPORT`
+  1159→* `EVIDENCE`
+  1160→
+  1161→### print\_agents
+  1162→
+  1163→* `id`
+  1164→* `name`
+  1165→* `site`
+  1166→* `machine\_identifier`
+  1167→* `agent\_version`
+  1168→* `status`
+  1169→* `last\_heartbeat\_at`
+  1170→* `capabilities\_json`
+  1171→* `created\_at`
+  1172→* `updated\_at`
+  1173→
+  1174→### printers
+  1175→
+  1176→* `id`
+  1177→* `print\_agent\_id`
+  1178→* `name`
+  1179→* `system\_name`
+  1180→* `connection\_type`
+  1181→* `driver\_name`
+  1182→* `capabilities\_json`
+  1183→* `status`
+  1184→* `last\_seen\_at`
+  1185→* `created\_at`
+  1186→* `updated\_at`
+  1187→
+  1188→### print\_routes
+  1189→
+  1190→* `id`
+  1191→* `document\_type`
+  1192→* `printer\_id`
+  1193→* `copies`
+  1194→* `paper\_size`
+  1195→* `orientation`
+  1196→* `auto\_print`
+  1197→* `active`
+  1198→
+  1199→### print\_jobs
+  1200→
+  1201→* `id`
+  1202→* `document\_id`
+  1203→* `printer\_id`
+  1204→* `order\_id`
+  1205→* `status`
+  1206→* `requested\_by\_user\_id`
+  1207→* `is\_reprint`
+  1208→* `attempt\_count`
+  1209→* `idempotency\_key`
+  1210→* `error\_code`
+  1211→* `error\_message`
+  1212→* `queued\_at`
+  1213→* `sent\_to\_agent\_at`
+  1214→* `sent\_to\_spool\_at`
+  1215→* `completed\_at`
+  1216→
+  1217→Unique:
+  1218→
+  1219→* `idempotency\_key`
+  1220→
+  1221→### whatsapp\_templates
+  1222→
+  1223→* `id`
+  1224→* `name`
+  1225→* `meta\_template\_name`
+  1226→* `language\_code`
+  1227→* `category`
+  1228→* `status`
+  1229→* `body\_template`
+  1230→* `variables\_schema\_json`
+  1231→* `event\_type`
+  1232→* `active`
+  1233→* `created\_at`
+  1234→* `updated\_at`
+  1235→
+  1236→### conversations
+  1237→
+  1238→* `id`
+  1239→* `customer\_id`
+  1240→* `phone\_e164`
+  1241→* `status`
+  1242→* `assigned\_user\_id`
+  1243→* `last\_message\_at`
+  1244→* `created\_at`
+  1245→* `updated\_at`
+  1246→
+  1247→### messages
+  1248→
+  1249→* `id`
+  1250→* `conversation\_id`
+  1251→* `order\_id`
+  1252→* `direction`
+  1253→* `provider\_message\_id`
+  1254→* `template\_id`
+  1255→* `type`
+  1256→* `status`
+  1257→* `body`
+  1258→* `metadata\_json`
+  1259→* `sent\_at`
+  1260→* `delivered\_at`
+  1261→* `read\_at`
+  1262→* `failed\_at`
+  1263→* `created\_at`
+  1264→
+  1265→Unique:
+  1266→
+  1267→* `provider\_message\_id`
+  1268→
+  1269→### webhook\_events
+  1270→
+  1271→* `id`
+  1272→* `provider`
+  1273→* `store\_id`
+  1274→* `external\_event\_id`
+  1275→* `event\_type`
+  1276→* `signature\_valid`
+  1277→* `headers\_redacted\_json`
+  1278→* `payload\_redacted\_json`
+  1279→* `payload\_hash`
+  1280→* `status`
+  1281→* `attempt\_count`
+  1282→* `received\_at`
+  1283→* `processed\_at`
+  1284→* `error\_code`
+  1285→* `error\_message`
+  1286→
+  1287→Unique:
+  1288→
+  1289→* `(provider, external\_event\_id)`
+  1290→* fallback `(provider, payload\_hash, received\_date\_bucket)`
+  1291→
+  1292→### idempotency\_keys
+  1293→
+  1294→* `id`
+  1295→* `scope`
+  1296→* `key`
+  1297→* `request\_hash`
+  1298→* `response\_snapshot\_json`
+  1299→* `status`
+  1300→* `expires\_at`
+  1301→* `created\_at`
+  1302→
+  1303→Unique:
+  1304→
+  1305→* `(scope, key)`
+  1306→
+  1307→### outbox\_events
+  1308→
+  1309→* `id`
+  1310→* `aggregate\_type`
+  1311→* `aggregate\_id`
+  1312→* `event\_type`
+  1313→* `event\_version`
+  1314→* `payload\_json`
+  1315→* `correlation\_id`
+  1316→* `causation\_id`
+  1317→* `status`
+  1318→* `available\_at`
+  1319→* `published\_at`
+  1320→* `attempt\_count`
+  1321→* `created\_at`
+  1322→
+  1323→### job\_executions
+  1324→
+  1325→* `id`
+  1326→* `queue\_name`
+  1327→* `job\_name`
+  1328→* `job\_id`
+  1329→* `correlation\_id`
+  1330→* `aggregate\_id`
+  1331→* `status`
+  1332→* `attempt`
+  1333→* `started\_at`
+  1334→* `completed\_at`
+  1335→* `error\_json`
+  1336→* `created\_at`
+  1337→
+  1338→### ad\_accounts / ad\_campaigns / ad\_spend\_daily
+  1339→
+  1340→Campos según proveedor, manteniendo:
+  1341→
+  1342→* proveedor;
+  1343→* cuenta;
+  1344→* campaña;
+  1345→* conjunto;
+  1346→* anuncio;
+  1347→* fecha;
+  1348→* moneda;
+  1349→* gasto;
+  1350→* impresiones;
+  1351→* clics;
+  1352→* conversiones reportadas;
+  1353→* payload fuente.
+  1354→
+  1355→### ad\_attributions
+  1356→
+  1357→* `id`
+  1358→* `order\_id`
+  1359→* `provider`
+  1360→* `campaign\_id`
+  1361→* `adset\_id`
+  1362→* `ad\_id`
+  1363→* `utm\_source`
+  1364→* `utm\_medium`
+  1365→* `utm\_campaign`
+  1366→* `click\_id`
+  1367→* `attribution\_type`
+  1368→* `confidence`
+  1369→* `allocated\_spend\_amount`
+  1370→* `metadata\_json`
+  1371→
+  1372→### profit\_snapshots
+  1373→
+  1374→* `id`
+  1375→* `order\_id`
+  1376→* `calculation\_version`
+  1377→* `recognized\_at`
+  1378→* `revenue\_amount`
+  1379→* `product\_cost\_amount`
+  1380→* `shipping\_cost\_amount`
+  1381→* `payment\_fee\_amount`
+  1382→* `ad\_cost\_amount`
+  1383→* `return\_cost\_amount`
+  1384→* `other\_cost\_amount`
+  1385→* `gross\_profit\_amount`
+  1386→* `net\_profit\_amount`
+  1387→* `margin\_percentage`
+  1388→* `inputs\_json`
+  1389→* `created\_at`
+  1390→
+  1391→### users / roles / permissions / user\_roles / role\_permissions
+  1392→
+  1393→RBAC estándar con UUID, estados y timestamps.
+  1394→
+  1395→### audit\_logs
+  1396→
+  1397→* `id`
+  1398→* `actor\_user\_id`
+  1399→* `action`
+  1400→* `resource\_type`
+  1401→* `resource\_id`
+  1402→* `before\_json`
+  1403→* `after\_json`
+  1404→* `ip\_hash`
+  1405→* `user\_agent`
+  1406→* `correlation\_id`
+  1407→* `created\_at`
+  1408→
+  1409→### alert\_recipients
+  1410→
+  1411→* `id`
+  1412→* `name`
+  1413→* `email`
+  1414→* `phone\_e164`
+  1415→* `user\_id`
+  1416→* `channels\_json`
+  1417→* `severity\_filter`
+  1418→* `alert\_types\_json`
+  1419→* `active`
+  1420→* `created\_at`
+  1421→* `updated\_at`
+  1422→
+  1423→### system\_alerts
+  1424→
+  1425→* `id`
+  1426→* `type`
+  1427→* `severity`
+  1428→* `status`
+  1429→* `title`
+  1430→* `details\_json`
+  1431→* `resource\_type`
+  1432→* `resource\_id`
+  1433→* `opened\_at`
+  1434→* `acknowledged\_at`
+  1435→* `resolved\_at`
+  1436→* `acknowledged\_by`
+  1437→
+  1438→\---
+  1439→
+  1440→# 11\. COLAS Y JOBS
+  1441→
+  1442→## 11.1 Colas
+  1443→
+  1444→```text
+  1445→shopify.webhooks
+  1446→shopify.order-sync
+  1447→shopify.reconciliation
+  1448→payments.create-link
+  1449→payments.webhooks
+  1450→payments.reconciliation
+  1451→payments.reminders
+  1452→payments.expiration
+  1453→logistics.create-order
+  1454→logistics.tracking
+  1455→logistics.reconciliation
+  1456→messaging.outbound
+  1457→messaging.webhooks
+  1458→printing.dispatch
+  1459→printing.status
+  1460→analytics.aggregate
+  1461→ads.sync
+  1462→documents.generate
+  1463→alerts.dispatch
+  1464→outbox.publish
+  1465→dead-letter
+  1466→```
+  1467→
+  1468→## 11.2 Política de reintentos
+  1469→
+  1470→* Error 4xx funcional: no reintentar salvo códigos explícitos.
+  1471→* Error 429: respetar `Retry-After`.
+  1472→* Error 5xx/timeout: backoff exponencial con jitter.
+  1473→* Máximo estándar:
+  1474→
+  1475→  * 5 intentos para APIs;
+  1476→  * 10 para mensajería;
+  1477→  * configurable por proveedor.
+  1478→* Después del máximo:
+  1479→
+  1480→  * DLQ;
+  1481→  * alerta;
+  1482→  * estado de error;
+  1483→  * reproceso manual.
+  1484→
+  1485→## 11.3 Idempotencia
+  1486→
+  1487→Ejemplos de keys:
+  1488→
+  1489→```text
+  1490→shopify:{storeId}:{topic}:{webhookId}
+  1491→payment-link:{orderId}:{rateRuleVersion}
+  1492→wompi-webhook:{transactionId}:{status}
+  1493→mastershop-create:{orderId}:{logisticsAttemptVersion}
+  1494→shopify-fulfillment:{orderId}:{shipmentId}
+  1495→print:{documentId}:{printerId}:{printGeneration}
+  1496→whatsapp:{eventType}:{orderId}:{templateVersion}
+  1497→```
+  1498→
+  1499→\---
+  1500→
+  1501→# 12\. CONTRATOS DE WEBHOOK
+  1502→
+  1503→## 12.1 Reglas comunes
+  1504→
+  1505→Todo endpoint de webhook debe:
+  1506→
+  1507→1. leer body crudo cuando la firma lo requiera;
+  1508→2. validar firma;
+  1509→3. validar timestamp;
+  1510→4. generar `correlationId`;
+  1511→5. registrar payload redacted;
+  1512→6. resolver idempotencia;
+  1513→7. responder rápido;
+  1514→8. procesar en cola;
+  1515→9. no ejecutar lógica prolongada dentro de la petición;
+  1516→10. devolver código apropiado.
+  1517→
+  1518→## 12.2 Shopify
+  1519→
+  1520→Endpoints propuestos:
+  1521→
+  1522→```text
+  1523→POST /webhooks/shopify/:storeId/orders-create
+  1524→POST /webhooks/shopify/:storeId/orders-updated
+  1525→POST /webhooks/shopify/:storeId/orders-cancelled
+  1526→POST /webhooks/shopify/:storeId/fulfillments
+  1527→POST /webhooks/shopify/:storeId/refunds
+  1528→POST /webhooks/shopify/:storeId/app-uninstalled
+  1529→```
+  1530→
+  1531→El conjunto final de topics debe confirmarse con documentación oficial.
+  1532→
+  1533→## 12.3 Wompi
+  1534→
+  1535→```text
+  1536→POST /webhooks/wompi
+  1537→```
+  1538→
+  1539→Flujo:
+  1540→
+  1541→* verificar checksum/firma;
+  1542→* persistir;
+  1543→* consultar transacción por API;
+  1544→* comparar referencia, monto y moneda;
+  1545→* confirmar solo con estado autorizado;
+  1546→* no confiar únicamente en el payload recibido.
+  1547→
+  1548→## 12.4 Mastershop
+  1549→
+  1550→```text
+  1551→POST /webhooks/mastershop
+  1552→```
+  1553→
+  1554→Es un placeholder contractual. No implementar hasta recibir:
+  1555→
+  1556→* método de autenticación;
+  1557→* firma;
+  1558→* esquema;
+  1559→* IDs;
+  1560→* eventos;
+  1561→* política de retry.
+  1562→
+  1563→## 12.5 Meta WhatsApp
+  1564→
+  1565→```text
+  1566→GET  /webhooks/whatsapp     # verificación
+  1567→POST /webhooks/whatsapp     # mensajes y estados
+  1568→```
+  1569→
+  1570→Debe manejar:
+  1571→
+  1572→* mensajes entrantes;
+  1573→* sent;
+  1574→* delivered;
+  1575→* read;
+  1576→* failed;
+  1577→* reintentos;
+  1578→* mensajes duplicados.
+  1579→
+  1580→\---
+  1581→
+  1582→# 13\. API INTERNA
+  1583→
+  1584→Recursos principales:
+  1585→
+  1586→```text
+  1587→/auth
+  1588→/users
+  1589→/roles
+  1590→/permissions
+  1591→/stores
+  1592→/integrations
+  1593→/orders
+  1594→/orders/:id/timeline
+  1595→/orders/:id/reprocess
+  1596→/orders/:id/reconcile
+  1597→/payments
+  1598→/payments/reconciliations
+  1599→/logistics
+  1600→/shipments
+  1601→/tracking
+  1602→/customers
+  1603→/conversations
+  1604→/messages
+  1605→/templates
+  1606→/printers
+  1607→/print-jobs
+  1608→/dashboards
+  1609→/reports
+  1610→/exports
+  1611→/alerts
+  1612→/audit
+  1613→/system/health
+  1614→/system/jobs
+  1615→/system/dlq
+  1616→```
+  1617→
+  1618→Todas las rutas deben:
+  1619→
+  1620→* usar RBAC;
+  1621→* validar DTO;
+  1622→* paginar;
+  1623→* permitir filtros;
+  1624→* auditar acciones sensibles;
+  1625→* evitar exponer secretos;
+  1626→* documentarse con OpenAPI.
+  1627→
+  1628→\---
+  1629→
+  1630→# 14\. ROLES Y PERMISOS
+  1631→
+  1632→## 14.1 Roles
+  1633→
+  1634→* Superadministrador.
+  1635→* Administrador.
+  1636→* Gerencia.
+  1637→* Bodega.
+  1638→* Servicio al cliente.
+  1639→* Finanzas.
+  1640→* Solo lectura.
+  1641→
+  1642→## 14.2 Matriz resumida
+  1643→
+  1644→|Módulo|Superadmin|Admin|Gerencia|Bodega|Servicio|Finanzas|Lectura|
+  1645→|-|-|-|-|-|-|-|-|
+  1646→|Usuarios y roles|total|limitado|no|no|no|no|no|
+  1647→|Integraciones|total|funcional|lectura|no|no|lectura limitada|no|
+  1648→|Pedidos|total|total|lectura|operación|operación|lectura|lectura|
+  1649→|Pagos|total|operación|lectura|no|lectura limitada|total|lectura|
+  1650→|Mastershop|total|operación|lectura|operación|seguimiento|lectura|lectura|
+  1651→|Impresión|total|total|lectura|total|reimpresión limitada|no|lectura|
+  1652→|WhatsApp|total|total|lectura|no|total|no|lectura|
+  1653→|Dashboard|total|total|total|operativo|operativo|financiero|lectura|
+  1654→|Reprocesos|total|permitido|no|impresión|mensajes|conciliación|no|
+  1655→|Auditoría|total|lectura|lectura|no|no|lectura|no|
+  1656→|Configuración crítica|total|no|no|no|no|no|no|
+  1657→
+  1658→El backend es la autoridad. Ocultar botones en frontend no constituye autorización.
+  1659→
+  1660→\---
+  1661→
+  1662→# 15\. SEGURIDAD
+  1663→
+  1664→## 15.1 Autenticación
+  1665→
+  1666→* usuarios por invitación;
+  1667→* recuperación por correo;
+  1668→* contraseña con Argon2id;
+  1669→* access token corto;
+  1670→* refresh token rotativo;
+  1671→* sesiones revocables;
+  1672→* bloqueo temporal por intentos;
+  1673→* MFA fuera del MVP, pero arquitectura compatible.
+  1674→
+  1675→## 15.2 Secretos
+  1676→
+  1677→* no guardar en Git;
+  1678→* usar variables de entorno y secretos cifrados;
+  1679→* credenciales por integración cifradas con una master key fuera de la base;
+  1680→* rotación;
+  1681→* redacción en logs.
+  1682→
+  1683→## 15.3 Protección API
+  1684→
+  1685→* HTTPS;
+  1686→* CORS restringido;
+  1687→* CSP;
+  1688→* rate limiting;
+  1689→* validación estricta;
+  1690→* protección CSRF según mecanismo de sesión;
+  1691→* límites de body;
+  1692→* prevención SSRF;
+  1693→* sanitización;
+  1694→* headers de seguridad.
+  1695→
+  1696→## 15.4 Datos
+  1697→
+  1698→* cifrado en tránsito;
+  1699→* cifrado en reposo;
+  1700→* documento de identidad cifrado;
+  1701→* backups cifrados;
+  1702→* minimización;
+  1703→* retención;
+  1704→* anonimización en desarrollo;
+  1705→* no copiar producción a local.
+  1706→
+  1707→## 15.5 Auditoría obligatoria
+  1708→
+  1709→* login;
+  1710→* logout;
+  1711→* invitaciones;
+  1712→* cambio de rol;
+  1713→* cambio de tarifa;
+  1714→* confirmación manual;
+  1715→* reproceso;
+  1716→* reimpresión;
+  1717→* edición de integración;
+  1718→* cambio de plantilla;
+  1719→* cancelación;
+  1720→* exportación;
+  1721→* acceso a datos sensibles.
+  1722→
+  1723→## 15.6 Cumplimiento
+  1724→
+  1725→Revisar con asesor legal:
+  1726→
+  1727→* Ley 1581 de 2012;
+  1728→* Habeas Data;
+  1729→* comercio electrónico;
+  1730→* términos de Wompi;
+  1731→* términos de Meta;
+  1732→* política de retención;
+  1733→* facturación;
+  1734→* tratamiento de conversaciones.
+  1735→
+  1736→\---
+  1737→
+  1738→# 16\. IMPRESIÓN
+  1739→
+  1740→## 16.1 Arquitectura del agente
+  1741→
+  1742→El agente Windows debe:
+  1743→
+  1744→* instalarse como servicio;
+  1745→* autenticarse mediante certificado o token rotativo;
+  1746→* registrar heartbeat;
+  1747→* descubrir impresoras;
+  1748→* reportar capacidades;
+  1749→* obtener trabajos;
+  1750→* descargar documentos mediante URL firmada;
+  1751→* verificar SHA-256;
+  1752→* enviar a spooler;
+  1753→* reportar estado;
+  1754→* mantener cola local cifrada;
+  1755→* evitar reimpresión accidental;
+  1756→* autoupdate firmado o actualización controlada;
+  1757→* producir logs locales con rotación.
+  1758→
+  1759→## 16.2 Conectividad
+  1760→
+  1761→LAN, USB o Bluetooth será responsabilidad del sistema operativo y driver. La plataforma interactuará con la impresora instalada en Windows; no implementará directamente todos los protocolos físicos.
+  1762→
+  1763→## 16.3 Limitación
+  1764→
+  1765→“Cualquier impresora” no puede garantizarse. Debe existir una matriz de compatibilidad validada por modelo y driver.
+  1766→
+  1767→\---
+  1768→
+  1769→# 17\. DASHBOARD Y MÉTRICAS
+  1770→
+  1771→## 17.1 Reglas contables
+  1772→
+  1773→* Venta reconocida: `ENTREGADO`.
+  1774→* Enviado: `EN\_TRANSITO`.
+  1775→* Devolución: `DEVUELTO`.
+  1776→* Guardar snapshots; no recalcular históricos con costos actuales.
+  1777→
+  1778→## 17.2 KPIs
+  1779→
+  1780→Operativos:
+  1781→
+  1782→* pedidos recibidos;
+  1783→* pagos pendientes;
+  1784→* pagos confirmados;
+  1785→* abandonos;
+  1786→* guías creadas;
+  1787→* errores Mastershop;
+  1788→* impresión pendiente/fallida;
+  1789→* en tránsito;
+  1790→* entregados;
+  1791→* devueltos;
+  1792→* cancelados;
+  1793→* tiempo pedido→guía;
+  1794→* tiempo guía→tránsito;
+  1795→* tiempo tránsito→entrega;
+  1796→* tasa de pago del transporte;
+  1797→* tasa de abandono;
+  1798→* efectividad de transportadora.
+  1799→
+  1800→Financieros:
+  1801→
+  1802→* ingresos reconocidos;
+  1803→* transporte cobrado;
+  1804→* costo de producto;
+  1805→* costo logístico;
+  1806→* comisiones;
+  1807→* gasto publicitario;
+  1808→* utilidad bruta;
+  1809→* utilidad neta;
+  1810→* margen;
+  1811→* valor perdido por devolución;
+  1812→* ROAS;
+  1813→* CPA.
+  1814→
+  1815→## 17.3 Publicidad
+  1816→
+  1817→MVP:
+  1818→
+  1819→* Meta Ads;
+  1820→* Google Ads;
+  1821→* TikTok Ads.
+  1822→
+  1823→Atribución:
+  1824→
+  1825→* UTMs;
+  1826→* click IDs;
+  1827→* datos de checkout;
+  1828→* Conversion API;
+  1829→* costo diario;
+  1830→* algoritmo documentado.
+  1831→
+  1832→No presentar atribución estimada como exacta.
+  1833→
+  1834→## 17.4 Exportaciones
+  1835→
+  1836→* CSV para datos crudos.
+  1837→* XLSX para análisis.
+  1838→* PDF para reportes ejecutivos.
+  1839→* Todos los exports deben generarse en worker, almacenarse y expirar.
+  1840→
+  1841→\---
+  1842→
+  1843→# 18\. INFRAESTRUCTURA EN ORACLE CLOUD
+  1844→
+  1845→## 18.1 Topología inicial
+  1846→
+  1847→```mermaid
+  1848→flowchart TB
+  1849→    Internet --> DNS\[DNS + TLS]
+  1850→    DNS --> Proxy\[Caddy o Nginx]
+  1851→    Proxy --> Web\[Next.js]
+  1852→    Proxy --> API\[NestJS API]
+  1853→    Proxy --> N8N\[n8n protegido]
+  1854→    API --> PG\[(PostgreSQL)]
+  1855→    API --> Redis\[(Redis)]
+  1856→    Workers\[Workers] --> PG
+  1857→    Workers --> Redis
+  1858→    Workers --> Object\[Object Storage]
+  1859→    Monitor\[Monitoring] --> API
+  1860→    Monitor --> Workers
+  1861→    Backup\[Backup Jobs] --> PG
+  1862→    Backup --> Object
+  1863→```
+  1864→
+  1865→## 18.2 Una VM
+  1866→
+  1867→Inicialmente pueden coexistir:
+  1868→
+  1869→* frontend;
+  1870→* API;
+  1871→* workers;
+  1872→* PostgreSQL;
+  1873→* Redis;
+  1874→* n8n;
+  1875→* proxy;
+  1876→* monitoreo ligero.
+  1877→
+  1878→Riesgo: punto único de fallo.
+  1879→
+  1880→## 18.3 Requisitos mínimos
+  1881→
+  1882→* Ubuntu LTS.
+  1883→* Docker Engine.
+  1884→* Docker Compose.
+  1885→* firewall.
+  1886→* SSH por llave.
+  1887→* usuario no root.
+  1888→* Fail2ban o equivalente.
+  1889→* TLS automático.
+  1890→* volúmenes persistentes.
+  1891→* límites de memoria.
+  1892→* health checks.
+  1893→* restart policies.
+  1894→* log rotation.
+  1895→* backups externos.
+  1896→
+  1897→## 18.4 Presupuesto
+  1898→
+  1899→Los costos de:
+  1900→
+  1901→* WhatsApp;
+  1902→* Wompi;
+  1903→* publicidad;
+  1904→* Object Storage;
+  1905→* correo;
+  1906→* dominio
+  1907→
+  1908→deben registrarse aparte del costo de VM. USD 35 puede no cubrir todos los servicios.
+  1909→
+  1910→\---
+  1911→
+  1912→# 19\. BACKUPS Y RECUPERACIÓN
+  1913→
+  1914→## 19.1 Política recomendada
+  1915→
+  1916→* diario: 30 días;
+  1917→* semanal: 12 semanas;
+  1918→* mensual: 12 meses;
+  1919→* anual: 10 años.
+  1920→
+  1921→No conservar 3.650 copias completas diarias sin análisis de costo.
+  1922→
+  1923→## 19.2 Contenido
+  1924→
+  1925→* PostgreSQL;
+  1926→* workflows n8n;
+  1927→* configuración no secreta;
+  1928→* documentos;
+  1929→* manifiestos;
+  1930→* scripts;
+  1931→* hashes;
+  1932→* metadatos.
+  1933→
+  1934→## 19.3 Objetivos
+  1935→
+  1936→* RPO objetivo: 24 horas inicialmente.
+  1937→* RTO objetivo operativo: 35 minutos para fallos de servicio recuperables.
+  1938→* Falla total de VM: el RTO dependerá de restauración y disponibilidad.
+  1939→
+  1940→## 19.4 Pruebas
+  1941→
+  1942→* restauración mensual automatizada o controlada;
+  1943→* verificación checksum;
+  1944→* evidencia;
+  1945→* runbook;
+  1946→* medición de tiempo.
+  1947→
+  1948→\---
+  1949→
+  1950→# 20\. CI/CD
+  1951→
+  1952→## 20.1 Flujo
+  1953→
+  1954→```text
+  1955→feature branch
+  1956→→ pull request
+  1957→→ lint
+  1958→→ typecheck
+  1959→→ unit tests
+  1960→→ integration tests
+  1961→→ build
+  1962→→ dependency/security scan
+  1963→→ migration check
+  1964→→ preview/local validation
+  1965→→ aprobación
+  1966→→ deploy
+  1967→→ migrations expand
+  1968→→ health checks
+  1969→→ smoke tests
+  1970→→ habilitar workers
+  1971→→ monitor
+  1972→```
+  1973→
+  1974→## 20.2 Reglas
+  1975→
+  1976→* no push directo a main;
+  1977→* mínimo una aprobación;
+  1978→* CODEOWNERS;
+  1979→* checks obligatorios;
+  1980→* Conventional Commits;
+  1981→* migraciones revisadas;
+  1982→* rollback definido;
+  1983→* despliegue manual a producción en MVP.
+  1984→
+  1985→## 20.3 Migraciones
+  1986→
+  1987→Aplicar expand/contract:
+  1988→
+  1989→1. agregar estructura compatible;
+  1990→2. desplegar código compatible;
+  1991→3. migrar datos;
+  1992→4. activar feature;
+  1993→5. retirar estructura antigua después.
+  1994→
+  1995→\---
+  1996→
+  1997→# 21\. ESTRATEGIA DE PRUEBAS
+  1998→
+  1999→## 21.1 Unitarias
+  2000→
+
+[showing lines 1-2000 of 3269; use offset=2001 with limit to continue reading]

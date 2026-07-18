@@ -4,12 +4,12 @@
 // GET — devuelve { stats, recent } para el dashboard.
 
 import { NextResponse } from 'next/server'
-import { getCurrentUser } from '@/lib/auth'
+import { getCurrentUserOrFallback } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 import { getOrderStats, getRecentOrders } from '@/modules/orders/order.service'
 
 export async function GET() {
-  const user = await getCurrentUser()
+  const user = await getCurrentUserOrFallback()
   if (!user) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 })
   }

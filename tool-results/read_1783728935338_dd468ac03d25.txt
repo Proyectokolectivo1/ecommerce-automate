@@ -1,0 +1,1176 @@
+     1→'use client'
+     2→
+     3→// ============================================================
+     4→// /dashboard/clientes — Customer CRM page
+     5→// ============================================================
+     6→// Client component. Lista clientes con filtros (búsqueda,
+     7→// clasificación, sort), KPIs, paginación y un drawer (Sheet)
+     8→// con el detalle completo: contacto, estadísticas e historial
+     9→// de pedidos.
+    10→//
+    11→// Endpoints consumidos (read-only, ya existentes):
+    12→//   GET /api/customers?classification=&search=&sortBy=&sortOrder=&limit=&offset=
+    13→//   GET /api/customers?stats=true
+    14→//   GET /api/customers/[id]   (cliente + últimos 50 pedidos)
+    15→
+    16→import { useEffect, useMemo, useState } from 'react'
+    17→import Link from 'next/link'
+    18→import { useQuery } from '@tanstack/react-query'
+    19→import { toast } from 'sonner'
+    20→import { formatDistanceToNow, format as formatDateFns, parseISO } from 'date-fns'
+    21→import { es } from 'date-fns/locale'
+    22→import {
+    23→  Users,
+    24→  Crown,
+    25→  Repeat,
+    26→  Receipt,
+    27→  UserPlus,
+    28→  Search,
+    29→  ArrowUp,
+    30→  ArrowDown,
+    31→  ArrowUpDown,
+    32→  Mail,
+    33→  Phone,
+    34→  MapPin,
+    35→  ChevronLeft,
+    36→  ChevronRight,
+    37→  Eye,
+    38→  Inbox,
+    39→  Loader2,
+    40→  ShoppingCart,
+    41→  Hash,
+    42→  CalendarClock,
+    43→  Building2,
+    44→  X,
+    45→} from 'lucide-react'
+    46→
+    47→import { Card, CardContent } from '@/components/ui/card'
+    48→import { Input } from '@/components/ui/input'
+    49→import { Button } from '@/components/ui/button'
+    50→import { Badge } from '@/components/ui/badge'
+    51→import {
+    52→  Table,
+    53→  TableBody,
+    54→  TableCell,
+    55→  TableHead,
+    56→  TableHeader,
+    57→  TableRow,
+    58→} from '@/components/ui/table'
+    59→import {
+    60→  Select,
+    61→  SelectContent,
+    62→  SelectItem,
+    63→  SelectTrigger,
+    64→  SelectValue,
+    65→} from '@/components/ui/select'
+    66→import {
+    67→  Sheet,
+    68→  SheetContent,
+    69→  SheetHeader,
+    70→  SheetTitle,
+    71→  SheetDescription,
+    72→} from '@/components/ui/sheet'
+    73→import { Skeleton } from '@/components/ui/skeleton'
+    74→import { Separator } from '@/components/ui/separator'
+    75→import { KPICard } from '@/components/shared/kpi-card'
+    76→import { StatusBadge } from '@/components/shared/status-badge'
+    77→import {
+    78→  CLASSIFICATION_BADGE_CLASSES,
+    79→  CLASSIFICATION_LABELS,
+    80→  CLASSIFICATION_DESCRIPTIONS,
+    81→} from '@/modules/customers/classification'
+    82→import type { CustomerClassification } from '@/lib/validation'
+    83→import { cn, formatCOP, formatDate } from '@/lib/format'
+    84→
+    85→// ------------------------------------------------------------
+    86→// Tipos (alineados con la API)
+    87→// ------------------------------------------------------------
+    88→
+    89→interface Customer {
+    90→  id: string
+    91→  shopifyId: string | null
+    92→  name: string
+    93→  email: string | null
+    94→  phone: string | null
+    95→  city: string | null
+    96→  address: string | null
+    97→  classification: string
+    98→  totalSpent: number
+    99→  ordersCount: number
+   100→  lastOrderAt: string | null
+   101→  createdAt: string
+   102→  updatedAt: string
+   103→}
+   104→
+   105→interface CustomerOrder {
+   106→  id: string
+   107→  orderNumber: string
+   108→  status: string
+   109→  paymentMethod: string
+   110→  total: number
+   111→  placedAt: string
+   112→  city: string | null
+   113→  _count: { items: number }
+   114→}
+   115→
+   116→interface CustomerWithOrders extends Customer {
+   117→  orders: CustomerOrder[]
+   118→}
+   119→
+   120→interface CustomersListResponse {
+   121→  customers: Customer[]
+   122→  total: number
+   123→}
+   124→
+   125→interface CustomersStats {
+   126→  total: number
+   127→  byClassification: Record<CustomerClassification, number>
+   128→  totalSpentAll: number
+   129→  avgTicket: number
+   130→  newThisMonth: number
+   131→}
+   132→
+   133→// ------------------------------------------------------------
+   134→// Constantes de presentación
+   135→// ------------------------------------------------------------
+   136→
+   137→const PAGE_SIZE = 15
+   138→
+   139→type SortBy = 'name' | 'totalSpent' | 'ordersCount' | 'lastOrderAt' | 'createdAt'
+   140→type SortOrder = 'asc' | 'desc'
+   141→
+   142→const CLASSIFICATION_OPTIONS: { value: string; label: string }[] = [
+   143→  { value: 'ALL', label: 'Todas las clasificaciones' },
+   144→  { value: 'VIP', label: 'VIP' },
+   145→  { value: 'FRECUENTE', label: 'Frecuentes' },
+   146→  { value: 'NUEVO', label: 'Nuevos' },
+   147→  { value: 'INACTIVO', label: 'Inactivos' },
+   148→]
+   149→
+   150→const SORT_BY_OPTIONS: { value: SortBy; label: string }[] = [
+   151→  { value: 'lastOrderAt', label: 'Último pedido' },
+   152→  { value: 'name', label: 'Nombre' },
+   153→  { value: 'totalSpent', label: 'Total gastado' },
+   154→  { value: 'ordersCount', label: 'N.º de pedidos' },
+   155→  { value: 'createdAt', label: 'Fecha de registro' },
+   156→]
+   157→
+   158→// ------------------------------------------------------------
+   159→// Helpers
+   160→// ------------------------------------------------------------
+   161→
+   162→function isClassification(value: string): value is CustomerClassification {
+   163→  return value === 'VIP' || value === 'FRECUENTE' || value === 'NUEVO' || value === 'INACTIVO'
+   164→}
+   165→
+   166→function relativeTime(date: string | null): string {
+   167→  if (!date) return 'Nunca'
+   168→  try {
+   169→    return formatDistanceToNow(new Date(date), { addSuffix: true, locale: es })
+   170→  } catch {
+   171→    return '—'
+   172→  }
+   173→}
+   174→
+   175→function formatLongDate(date: string | null): string {
+   176→  if (!date) return 'Nunca'
+   177→  try {
+   178→    return formatDateFns(parseISO(date), "d 'de' MMMM 'de' yyyy, HH:mm", { locale: es })
+   179→  } catch {
+   180→    return formatDate(date)
+   181→  }
+   182→}
+   183→
+   184→// ------------------------------------------------------------
+   185→// Subcomponentes
+   186→// ------------------------------------------------------------
+   187→
+   188→function ClassificationBadge({ classification }: { classification: string }) {
+   189→  if (!isClassification(classification)) {
+   190→    return (
+   191→      <Badge variant="outline" className="border-border text-muted-foreground">
+   192→        {classification || '—'}
+   193→      </Badge>
+   194→    )
+   195→  }
+   196→  return (
+   197→    <Badge
+   198→      variant="outline"
+   199→      className={cn('border', CLASSIFICATION_BADGE_CLASSES[classification])}
+   200→      title={CLASSIFICATION_DESCRIPTIONS[classification]}
+   201→    >
+   202→      {CLASSIFICATION_LABELS[classification]}
+   203→    </Badge>
+   204→  )
+   205→}
+   206→
+   207→function PaymentMethodBadge({ method }: { method: string }) {
+   208→  const isPrepaid = method === 'PREPAID'
+   209→  const isCod = method === 'COD'
+   210→  return (
+   211→    <Badge
+   212→      variant="outline"
+   213→      className={cn(
+   214→        'border',
+   215→        isPrepaid &&
+   216→          'border-zinc-300 bg-zinc-100 text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-300',
+   217→        isCod &&
+   218→          'border-amber-300 bg-amber-100 text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
+   219→        !isPrepaid && !isCod && 'border-border bg-muted text-muted-foreground',
+   220→      )}
+   221→    >
+   222→      {isPrepaid ? 'Prepago' : isCod ? 'Contra entrega' : method || '—'}
+   223→    </Badge>
+   224→  )
+   225→}
+   226→
+   227→interface SortableHeaderProps {
+   228→  label: string
+   229→  field: SortBy
+   230→  activeSortBy: SortBy
+   231→  activeSortOrder: SortOrder
+   232→  onSort: (field: SortBy) => void
+   233→  className?: string
+   234→}
+   235→
+   236→function SortableHeader({
+   237→  label,
+   238→  field,
+   239→  activeSortBy,
+   240→  activeSortOrder,
+   241→  onSort,
+   242→  className,
+   243→}: SortableHeaderProps) {
+   244→  const isActive = activeSortBy === field
+   245→  return (
+   246→    <button
+   247→      type="button"
+   248→      onClick={() => onSort(field)}
+   249→      className={cn(
+   250→        'inline-flex items-center gap-1 text-left font-medium text-xs uppercase tracking-wide transition-colors',
+   251→        isActive ? 'text-foreground' : 'text-muted-foreground hover:text-foreground',
+   252→        className,
+   253→      )}
+   254→      aria-pressed={isActive}
+   255→    >
+   256→      {label}
+   257→      {isActive ? (
+   258→        activeSortOrder === 'asc' ? (
+   259→          <ArrowUp className="size-3.5" aria-hidden />
+   260→        ) : (
+   261→          <ArrowDown className="size-3.5" aria-hidden />
+   262→        )
+   263→      ) : (
+   264→        <ArrowUpDown className="size-3 opacity-50" aria-hidden />
+   265→      )}
+   266→    </button>
+   267→  )
+   268→}
+   269→
+   270→/** Devuelve el valor aria-sort para un `<th>` según el estado de ordenamiento. */
+   271→function ariaSortValue(
+   272→  field: SortBy,
+   273→  activeSortBy: SortBy,
+   274→  activeSortOrder: SortOrder,
+   275→): 'ascending' | 'descending' | 'none' {
+   276→  if (field !== activeSortBy) return 'none'
+   277→  return activeSortOrder === 'asc' ? 'ascending' : 'descending'
+   278→}
+   279→
+   280→function MiniStat({
+   281→  icon,
+   282→  label,
+   283→  value,
+   284→}: {
+   285→  icon: React.ReactNode
+   286→  label: string
+   287→  value: string
+   288→}) {
+   289→  return (
+   290→    <div className="rounded-lg border bg-card p-3">
+   291→      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+   292→        <span className="text-muted-foreground" aria-hidden>
+   293→          {icon}
+   294→        </span>
+   295→        {label}
+   296→      </div>
+   297→      <p className="mt-1 truncate text-lg font-semibold text-foreground" title={value}>
+   298→        {value}
+   299→      </p>
+   300→    </div>
+   301→  )
+   302→}
+   303→
+   304→function InfoRow({
+   305→  icon,
+   306→  label,
+   307→  children,
+   308→}: {
+   309→  icon: React.ReactNode
+   310→  label: string
+   311→  children: React.ReactNode
+   312→}) {
+   313→  return (
+   314→    <div className="flex items-start gap-2.5 py-1.5">
+   315→      <span className="mt-0.5 text-muted-foreground" aria-hidden>
+   316→        {icon}
+   317→      </span>
+   318→      <div className="min-w-0 flex-1">
+   319→        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</p>
+   320→        <div className="text-sm text-foreground">{children}</div>
+   321→      </div>
+   322→    </div>
+   323→  )
+   324→}
+   325→
+   326→function SectionTitle({ children }: { children: React.ReactNode }) {
+   327→  return (
+   328→    <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+   329→      {children}
+   330→    </h3>
+   331→  )
+   332→}
+   333→
+   334→// Skeletons
+   335→function KpiSkeleton() {
+   336→  return (
+   337→    <Card className="gap-0 p-4 md:p-5">
+   338→      <CardContent className="p-0">
+   339→        <div className="flex items-start justify-between gap-3">
+   340→          <div className="flex-1 space-y-2">
+   341→            <Skeleton className="h-3 w-20" />
+   342→            <Skeleton className="h-8 w-24" />
+   343→            <Skeleton className="h-3 w-16" />
+   344→          </div>
+   345→          <Skeleton className="size-10 rounded-lg" />
+   346→        </div>
+   347→      </CardContent>
+   348→    </Card>
+   349→  )
+   350→}
+   351→
+   352→function RowSkeleton() {
+   353→  return (
+   354→    <TableRow>
+   355→      <TableCell>
+   356→        <div className="space-y-1.5">
+   357→          <Skeleton className="h-4 w-32" />
+   358→          <Skeleton className="h-3 w-44" />
+   359→        </div>
+   360→      </TableCell>
+   361→      <TableCell className="hidden md:table-cell">
+   362→        <Skeleton className="h-4 w-24" />
+   363→      </TableCell>
+   364→      <TableCell className="hidden lg:table-cell">
+   365→        <Skeleton className="h-4 w-20" />
+   366→      </TableCell>
+   367→      <TableCell>
+   368→        <Skeleton className="h-5 w-16 rounded-full" />
+   369→      </TableCell>
+   370→      <TableCell>
+   371→        <Skeleton className="h-4 w-6" />
+   372→      </TableCell>
+   373→      <TableCell>
+   374→        <Skeleton className="h-4 w-20" />
+   375→      </TableCell>
+   376→      <TableCell className="hidden md:table-cell">
+   377→        <Skeleton className="h-4 w-20" />
+   378→      </TableCell>
+   379→      <TableCell>
+   380→        <Skeleton className="h-8 w-20" />
+   381→      </TableCell>
+   382→    </TableRow>
+   383→  )
+   384→}
+   385→
+   386→// ------------------------------------------------------------
+   387→// Página principal
+   388→// ------------------------------------------------------------
+   389→
+   390→export default function ClientesPage() {
+   391→  // Estados de filtros
+   392→  const [search, setSearch] = useState('')
+   393→  const [debouncedSearch, setDebouncedSearch] = useState('')
+   394→  const [classification, setClassification] = useState<string>('ALL')
+   395→  const [sortBy, setSortBy] = useState<SortBy>('lastOrderAt')
+   396→  const [sortOrder, setSortOrder] = useState<SortOrder>('desc')
+   397→  const [page, setPage] = useState(0)
+   398→  const [selectedId, setSelectedId] = useState<string | null>(null)
+   399→
+   400→  // Debounce 300ms del input de búsqueda.
+   401→  useEffect(() => {
+   402→    const t = setTimeout(() => {
+   403→      setDebouncedSearch(search.trim())
+   404→      setPage(0)
+   405→    }, 300)
+   406→    return () => clearTimeout(t)
+   407→  }, [search])
+   408→
+   409→  // ---------------- Queries ----------------
+   410→
+   411→  const statsQuery = useQuery<CustomersStats>({
+   412→    queryKey: ['customers-stats'],
+   413→    queryFn: async () => {
+   414→      const res = await fetch('/api/customers?stats=true')
+   415→      if (!res.ok) {
+   416→        const err = (await res.json().catch(() => ({}))) as { error?: string }
+   417→        throw new Error(err?.error ?? `Error ${res.status}`)
+   418→      }
+   419→      return res.json() as Promise<CustomersStats>
+   420→    },
+   421→    staleTime: 30_000,
+   422→  })
+   423→
+   424→  const listQuery = useQuery<CustomersListResponse>({
+   425→    queryKey: [
+   426→      'customers',
+   427→      classification,
+   428→      debouncedSearch,
+   429→      sortBy,
+   430→      sortOrder,
+   431→      page,
+   432→    ],
+   433→    queryFn: async () => {
+   434→      const params = new URLSearchParams()
+   435→      if (classification && classification !== 'ALL') {
+   436→        params.set('classification', classification)
+   437→      }
+   438→      if (debouncedSearch) params.set('search', debouncedSearch)
+   439→      params.set('sortBy', sortBy)
+   440→      params.set('sortOrder', sortOrder)
+   441→      params.set('limit', String(PAGE_SIZE))
+   442→      params.set('offset', String(page * PAGE_SIZE))
+   443→      const res = await fetch(`/api/customers?${params.toString()}`)
+   444→      if (!res.ok) {
+   445→        const err = (await res.json().catch(() => ({}))) as { error?: string }
+   446→        throw new Error(err?.error ?? `Error ${res.status}`)
+   447→      }
+   448→      return res.json() as Promise<CustomersListResponse>
+   449→    },
+   450→    placeholderData: (prev) => prev,
+   451→  })
+   452→
+   453→  const detailQuery = useQuery<CustomerWithOrders>({
+   454→    queryKey: ['customer', selectedId],
+   455→    enabled: !!selectedId,
+   456→    queryFn: async () => {
+   457→      if (!selectedId) throw new Error('No customer selected')
+   458→      const res = await fetch(`/api/customers/${selectedId}`)
+   459→      if (!res.ok) {
+   460→        const err = (await res.json().catch(() => ({}))) as { error?: string }
+   461→        throw new Error(err?.error ?? `Error ${res.status}`)
+   462→      }
+   463→      return res.json() as Promise<CustomerWithOrders>
+   464→    },
+   465→  })
+   466→
+   467→  // Toasts de error (no encadenar en render: useEffect).
+   468→  useEffect(() => {
+   469→    if (statsQuery.error) {
+   470→      toast.error('Error al cargar métricas', {
+   471→        description:
+   472→          statsQuery.error instanceof Error ? statsQuery.error.message : undefined,
+   473→      })
+   474→    }
+   475→  }, [statsQuery.error])
+   476→
+   477→  useEffect(() => {
+   478→    if (listQuery.error) {
+   479→      toast.error('Error al cargar clientes', {
+   480→        description:
+   481→          listQuery.error instanceof Error ? listQuery.error.message : undefined,
+   482→      })
+   483→    }
+   484→  }, [listQuery.error])
+   485→
+   486→  useEffect(() => {
+   487→    if (detailQuery.error) {
+   488→      toast.error('Error al cargar el detalle del cliente', {
+   489→        description:
+   490→          detailQuery.error instanceof Error ? detailQuery.error.message : undefined,
+   491→      })
+   492→    }
+   493→  }, [detailQuery.error])
+   494→
+   495→  // ---------------- Handlers ----------------
+   496→
+   497→  function handleSort(field: SortBy) {
+   498→    if (field === sortBy) {
+   499→      setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'))
+   500→    } else {
+   501→      setSortBy(field)
+   502→      // Orden inicial razonable por columna.
+   503→      setSortOrder(field === 'name' ? 'asc' : 'desc')
+   504→    }
+   505→    setPage(0)
+   506→  }
+   507→
+   508→  function toggleSortOrder() {
+   509→    setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'))
+   510→  }
+   511→
+   512→  function clearFilters() {
+   513→    setSearch('')
+   514→    setDebouncedSearch('')
+   515→    setClassification('ALL')
+   516→    setSortBy('lastOrderAt')
+   517→    setSortOrder('desc')
+   518→    setPage(0)
+   519→  }
+   520→
+   521→  // ---------------- Derived ----------------
+   522→
+   523→  const customers = listQuery.data?.customers ?? []
+   524→  const total = listQuery.data?.total ?? 0
+   525→  const from = total === 0 ? 0 : page * PAGE_SIZE + 1
+   526→  const to = Math.min((page + 1) * PAGE_SIZE, total)
+   527→  const hasNext = to < total
+   528→  const hasPrev = page > 0
+   529→
+   530→  const hasActiveFilters =
+   531→    classification !== 'ALL' ||
+   532→    search.trim() !== '' ||
+   533→    sortBy !== 'lastOrderAt' ||
+   534→    sortOrder !== 'desc'
+   535→
+   536→  const stats = statsQuery.data
+   537→  const detail = detailQuery.data
+   538→  const detailOrders = detail?.orders ?? []
+   539→
+   540→  const detailAvgTicket =
+   541→    detail && detail.ordersCount > 0 ? detail.totalSpent / detail.ordersCount : 0
+   542→
+   543→  const listIsLoading = listQuery.isLoading && !listQuery.data
+   544→  const listIsFetching = listQuery.isFetching && !!listQuery.data
+   545→
+   546→  // Memo de KPIs para evitar re-renders.
+   547→  const kpis = useMemo(() => {
+   548→    if (!stats) return null
+   549→    return [
+   550→      {
+   551→        title: 'Total clientes',
+   552→        value: String(stats.total),
+   553→        icon: <Users className="size-5" />,
+   554→        subtitle: 'En la plataforma',
+   555→      },
+   556→      {
+   557→        title: 'VIP',
+   558→        value: String(stats.byClassification.VIP ?? 0),
+   559→        icon: <Crown className="size-5" />,
+   560→        subtitle: 'Clientes estrella',
+   561→      },
+   562→      {
+   563→        title: 'Frecuentes',
+   564→        value: String(stats.byClassification.FRECUENTE ?? 0),
+   565→        icon: <Repeat className="size-5" />,
+   566→        subtitle: 'Clientes recurrentes',
+   567→      },
+   568→      {
+   569→        title: 'Ticket promedio',
+   570→        value: formatCOP(stats.avgTicket),
+   571→        icon: <Receipt className="size-5" />,
+   572→        subtitle: 'Por pedido',
+   573→      },
+   574→      {
+   575→        title: 'Nuevos este mes',
+   576→        value: String(stats.newThisMonth),
+   577→        icon: <UserPlus className="size-5" />,
+   578→        subtitle: 'Inscripciones recientes',
+   579→      },
+   580→    ]
+   581→  }, [stats])
+   582→
+   583→  // ---------------- Render ----------------
+   584→
+   585→  return (
+   586→    <div className="mx-auto w-full max-w-7xl space-y-6 p-4 md:p-6">
+   587→      {/* Header */}
+   588→      <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+   589→        <div className="space-y-1">
+   590→          <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
+   591→            <Users className="size-6 text-muted-foreground" aria-hidden />
+   592→            Clientes
+   593→          </h1>
+   594→          <p className="text-sm text-muted-foreground">
+   595→            CRM de clientes con historial de compras, clasificación
+   596→            automática y métricas.
+   597→          </p>
+   598→        </div>
+   599→      </header>
+   600→
+   601→      {/* KPI row */}
+   602→      <section
+   603→        aria-label="Métricas de clientes"
+   604→        className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5"
+   605→      >
+   606→        {statsQuery.isLoading && !stats
+   607→          ? Array.from({ length: 5 }).map((_, i) => <KpiSkeleton key={i} />)
+   608→          : kpis
+   609→            ? kpis.map((kpi) => (
+   610→                <KPICard
+   611→                  key={kpi.title}
+   612→                  title={kpi.title}
+   613→                  value={kpi.value}
+   614→                  icon={kpi.icon}
+   615→                  subtitle={kpi.subtitle}
+   616→                  loading={false}
+   617→                />
+   618→              ))
+   619→            : null}
+   620→      </section>
+   621→
+   622→      {/* Filters bar */}
+   623→      <section
+   624→        aria-label="Filtros de clientes"
+   625→        className="rounded-xl border bg-card p-4 shadow-sm"
+   626→      >
+   627→        <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
+   628→          {/* Search */}
+   629→          <div className="flex-1 space-y-1.5">
+   630→            <label htmlFor="customer-search" className="text-xs font-medium text-muted-foreground">
+   631→              Buscar
+   632→            </label>
+   633→            <div className="relative">
+   634→              <Search
+   635→                className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+   636→                aria-hidden
+   637→              />
+   638→              <Input
+   639→                id="customer-search"
+   640→                value={search}
+   641→                onChange={(e) => setSearch(e.target.value)}
+   642→                placeholder="Nombre, email, teléfono o ciudad…"
+   643→                className="pl-9"
+   644→                autoComplete="off"
+   645→              />
+   646→              {search && (
+   647→                <button
+   648→                  type="button"
+   649→                  onClick={() => setSearch('')}
+   650→                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded-sm p-0.5 text-muted-foreground hover:text-foreground"
+   651→                  aria-label="Limpiar búsqueda"
+   652→                >
+   653→                  <X className="size-4" />
+   654→                </button>
+   655→              )}
+   656→            </div>
+   657→          </div>
+   658→
+   659→          {/* Classification */}
+   660→          <div className="w-full space-y-1.5 sm:w-52">
+   661→            <label htmlFor="customer-classification" className="block text-xs font-medium text-muted-foreground">
+   662→              Clasificación
+   663→            </label>
+   664→            <Select
+   665→              value={classification}
+   666→              onValueChange={(v) => {
+   667→                setClassification(v)
+   668→                setPage(0)
+   669→              }}
+   670→            >
+   671→              <SelectTrigger id="customer-classification" className="w-full">
+   672→                <SelectValue placeholder="Todas" />
+   673→              </SelectTrigger>
+   674→              <SelectContent>
+   675→                {CLASSIFICATION_OPTIONS.map((opt) => (
+   676→                  <SelectItem key={opt.value} value={opt.value}>
+   677→                    {opt.label}
+   678→                  </SelectItem>
+   679→                ))}
+   680→              </SelectContent>
+   681→            </Select>
+   682→          </div>
+   683→
+   684→          {/* Sort by */}
+   685→          <div className="w-full space-y-1.5 sm:w-52">
+   686→            <label htmlFor="customer-sort-by" className="block text-xs font-medium text-muted-foreground">
+   687→              Ordenar por
+   688→            </label>
+   689→            <Select
+   690→              value={sortBy}
+   691→              onValueChange={(v) => {
+   692→                setSortBy(v as SortBy)
+   693→                setPage(0)
+   694→              }}
+   695→            >
+   696→              <SelectTrigger id="customer-sort-by" className="w-full">
+   697→                <SelectValue placeholder="Último pedido" />
+   698→              </SelectTrigger>
+   699→              <SelectContent>
+   700→                {SORT_BY_OPTIONS.map((opt) => (
+   701→                  <SelectItem key={opt.value} value={opt.value}>
+   702→                    {opt.label}
+   703→                  </SelectItem>
+   704→                ))}
+   705→              </SelectContent>
+   706→            </Select>
+   707→          </div>
+   708→
+   709→          {/* Sort order toggle */}
+   710→          <div className="flex items-end gap-2">
+   711→            <Button
+   712→              type="button"
+   713→              variant="outline"
+   714→              size="icon"
+   715→              onClick={toggleSortOrder}
+   716→              aria-label={
+   717→                sortOrder === 'asc' ? 'Cambiar a descendente' : 'Cambiar a ascendente'
+   718→              }
+   719→              title={sortOrder === 'asc' ? 'Ascendente' : 'Descendente'}
+   720→              className="size-9"
+   721→            >
+   722→              {sortOrder === 'asc' ? (
+   723→                <ArrowUp className="size-4" />
+   724→              ) : (
+   725→                <ArrowDown className="size-4" />
+   726→              )}
+   727→            </Button>
+   728→            {hasActiveFilters && (
+   729→              <Button
+   730→                type="button"
+   731→                variant="ghost"
+   732→                size="sm"
+   733→                onClick={clearFilters}
+   734→                className="gap-1.5 text-muted-foreground"
+   735→              >
+   736→                <X className="size-4" />
+   737→                Limpiar
+   738→              </Button>
+   739→            )}
+   740→          </div>
+   741→        </div>
+   742→      </section>
+   743→
+   744→      {/* Customers table */}
+   745→      <section
+   746→        aria-label="Lista de clientes"
+   747→        className="rounded-xl border bg-card shadow-sm"
+   748→      >
+   749→        <div className="relative overflow-x-auto">
+   750→          <Table>
+   751→            <TableHeader>
+   752→              <TableRow className="bg-muted/40 hover:bg-muted/40">
+   753→                <TableHead className="w-[260px]" aria-sort={ariaSortValue('name', sortBy, sortOrder)}>
+   754→                  <SortableHeader
+   755→                    label="Cliente"
+   756→                    field="name"
+   757→                    activeSortBy={sortBy}
+   758→                    activeSortOrder={sortOrder}
+   759→                    onSort={handleSort}
+   760→                  />
+   761→                </TableHead>
+   762→                <TableHead className="hidden md:table-cell">Teléfono</TableHead>
+   763→                <TableHead className="hidden lg:table-cell">Ciudad</TableHead>
+   764→                <TableHead>Clasificación</TableHead>
+   765→                <TableHead
+   766→                  className="text-right"
+   767→                  aria-sort={ariaSortValue('ordersCount', sortBy, sortOrder)}
+   768→                >
+   769→                  <SortableHeader
+   770→                    label="Pedidos"
+   771→                    field="ordersCount"
+   772→                    activeSortBy={sortBy}
+   773→                    activeSortOrder={sortOrder}
+   774→                    onSort={handleSort}
+   775→                    className="justify-end"
+   776→                  />
+   777→                </TableHead>
+   778→                <TableHead
+   779→                  className="text-right"
+   780→                  aria-sort={ariaSortValue('totalSpent', sortBy, sortOrder)}
+   781→                >
+   782→                  <SortableHeader
+   783→                    label="Total gastado"
+   784→                    field="totalSpent"
+   785→                    activeSortBy={sortBy}
+   786→                    activeSortOrder={sortOrder}
+   787→                    onSort={handleSort}
+   788→                    className="justify-end"
+   789→                  />
+   790→                </TableHead>
+   791→                <TableHead
+   792→                  className="hidden md:table-cell"
+   793→                  aria-sort={ariaSortValue('lastOrderAt', sortBy, sortOrder)}
+   794→                >
+   795→                  <SortableHeader
+   796→                    label="Último pedido"
+   797→                    field="lastOrderAt"
+   798→                    activeSortBy={sortBy}
+   799→                    activeSortOrder={sortOrder}
+   800→                    onSort={handleSort}
+   801→                  />
+   802→                </TableHead>
+   803→                <TableHead className="text-right">Acciones</TableHead>
+   804→              </TableRow>
+   805→            </TableHeader>
+   806→            <TableBody>
+   807→              {listIsLoading ? (
+   808→                Array.from({ length: 8 }).map((_, i) => <RowSkeleton key={i} />)
+   809→              ) : customers.length === 0 ? (
+   810→                <TableRow>
+   811→                  <TableCell colSpan={8} className="h-48">
+   812→                    <div className="flex flex-col items-center justify-center gap-3 text-center">
+   813→                      <div className="flex size-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
+   814→                        <Inbox className="size-6" aria-hidden />
+   815→                      </div>
+   816→                      <div className="space-y-1">
+   817→                        <p className="text-sm font-medium text-foreground">
+   818→                          No hay clientes registrados
+   819→                        </p>
+   820→                        <p className="text-xs text-muted-foreground">
+   821→                          {hasActiveFilters
+   822→                            ? 'Prueba con otros filtros o limpia la búsqueda.'
+   823→                            : 'Los clientes aparecerán aquí cuando se importen pedidos.'}
+   824→                        </p>
+   825→                      </div>
+   826→                    </div>
+   827→                  </TableCell>
+   828→                </TableRow>
+   829→              ) : (
+   830→                customers.map((c) => (
+   831→                  <TableRow
+   832→                    key={c.id}
+   833→                    className="cursor-pointer transition-colors hover:bg-muted/40"
+   834→                    onClick={() => setSelectedId(c.id)}
+   835→                  >
+   836→                    <TableCell>
+   837→                      <div className="flex flex-col">
+   838→                        <span className="font-medium text-foreground">{c.name}</span>
+   839→                        {c.email && (
+   840→                          <span className="truncate text-xs text-muted-foreground" title={c.email}>
+   841→                            {c.email}
+   842→                          </span>
+   843→                        )}
+   844→                      </div>
+   845→                    </TableCell>
+   846→                    <TableCell className="hidden md:table-cell">
+   847→                      {c.phone ? (
+   848→                        <span className="text-sm tabular-nums text-foreground">{c.phone}</span>
+   849→                      ) : (
+   850→                        <span className="text-muted-foreground">—</span>
+   851→                      )}
+   852→                    </TableCell>
+   853→                    <TableCell className="hidden lg:table-cell">
+   854→                      {c.city ? (
+   855→                        <span className="text-sm text-foreground">{c.city}</span>
+   856→                      ) : (
+   857→                        <span className="text-muted-foreground">—</span>
+   858→                      )}
+   859→                    </TableCell>
+   860→                    <TableCell>
+   861→                      <ClassificationBadge classification={c.classification} />
+   862→                    </TableCell>
+   863→                    <TableCell className="text-right">
+   864→                      <span className="tabular-nums text-foreground">{c.ordersCount}</span>
+   865→                    </TableCell>
+   866→                    <TableCell className="text-right">
+   867→                      <span className="tabular-nums font-medium text-foreground">
+   868→                        {formatCOP(c.totalSpent)}
+   869→                      </span>
+   870→                    </TableCell>
+   871→                    <TableCell className="hidden md:table-cell">
+   872→                      <span
+   873→                        className="text-sm text-muted-foreground"
+   874→                        title={c.lastOrderAt ? formatLongDate(c.lastOrderAt) : undefined}
+   875→                      >
+   876→                        {relativeTime(c.lastOrderAt)}
+   877→                      </span>
+   878→                    </TableCell>
+   879→                    <TableCell className="text-right">
+   880→                      <Button
+   881→                        variant="ghost"
+   882→                        size="sm"
+   883→                        className="gap-1.5"
+   884→                        onClick={(e) => {
+   885→                          e.stopPropagation()
+   886→                          setSelectedId(c.id)
+   887→                        }}
+   888→                      >
+   889→                        <Eye className="size-4" />
+   890→                        <span className="hidden sm:inline">Ver detalle</span>
+   891→                      </Button>
+   892→                    </TableCell>
+   893→                  </TableRow>
+   894→                ))
+   895→              )}
+   896→            </TableBody>
+   897→          </Table>
+   898→          {listIsFetching && !listIsLoading ? (
+   899→            <div className="pointer-events-none absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-background/80 px-2 py-1 text-xs text-muted-foreground shadow-sm backdrop-blur">
+   900→              <Loader2 className="size-3 animate-spin" />
+   901→              Actualizando…
+   902→            </div>
+   903→          ) : null}
+   904→        </div>
+   905→
+   906→        {/* Pagination */}
+   907→        <Separator />
+   908→        <div className="flex flex-col items-center justify-between gap-3 p-3 sm:flex-row">
+   909→          <p className="text-xs text-muted-foreground" aria-live="polite">
+   910→            {total === 0
+   911→              ? 'Sin resultados'
+   912→              : `Mostrando ${from}–${to} de ${total} cliente${total === 1 ? '' : 's'}`}
+   913→          </p>
+   914→          <div className="flex items-center gap-2">
+   915→            <Button
+   916→              variant="outline"
+   917→              size="sm"
+   918→              onClick={() => setPage((p) => Math.max(0, p - 1))}
+   919→              disabled={!hasPrev || listIsFetching}
+   920→              className="gap-1"
+   921→            >
+   922→              <ChevronLeft className="size-4" />
+   923→              Anterior
+   924→            </Button>
+   925→            <span className="text-xs text-muted-foreground">Pág. {page + 1}</span>
+   926→            <Button
+   927→              variant="outline"
+   928→              size="sm"
+   929→              onClick={() => setPage((p) => p + 1)}
+   930→              disabled={!hasNext || listIsFetching}
+   931→              className="gap-1"
+   932→            >
+   933→              Siguiente
+   934→              <ChevronRight className="size-4" />
+   935→            </Button>
+   936→          </div>
+   937→        </div>
+   938→      </section>
+   939→
+   940→      {/* Detail drawer */}
+   941→      <Sheet
+   942→        open={!!selectedId}
+   943→        onOpenChange={(open) => {
+   944→          if (!open) setSelectedId(null)
+   945→        }}
+   946→      >
+   947→        <SheetContent
+   948→          side="right"
+   949→          className="flex w-full flex-col gap-0 p-0 sm:max-w-2xl"
+   950→        >
+   951→          {/* Header */}
+   952→          <SheetHeader className="space-y-2 border-b p-5">
+   953→            <div className="flex items-start justify-between gap-3 pr-6">
+   954→              <SheetTitle className="text-xl font-bold tracking-tight">
+   955→                {detail?.name ?? 'Cliente'}
+   956→              </SheetTitle>
+   957→              {detail && <ClassificationBadge classification={detail.classification} />}
+   958→            </div>
+   959→            <SheetDescription className="sr-only">
+   960→              Detalle del cliente e historial de pedidos
+   961→            </SheetDescription>
+   962→            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+   963→              {detail?.email && (
+   964→                <a
+   965→                  href={`mailto:${detail.email}`}
+   966→                  className="inline-flex items-center gap-1.5 transition-colors hover:text-foreground"
+   967→                >
+   968→                  <Mail className="size-3.5" />
+   969→                  {detail.email}
+   970→                </a>
+   971→              )}
+   972→              {detail?.phone && (
+   973→                <a
+   974→                  href={`tel:${detail.phone.replace(/\s+/g, '')}`}
+   975→                  className="inline-flex items-center gap-1.5 transition-colors hover:text-foreground"
+   976→                >
+   977→                  <Phone className="size-3.5" />
+   978→                  {detail.phone}
+   979→                </a>
+   980→              )}
+   981→            </div>
+   982→          </SheetHeader>
+   983→
+   984→          {/* Body */}
+   985→          <div className="thin-scroll flex-1 space-y-6 overflow-y-auto p-5">
+   986→            {detailQuery.isLoading && !detail ? (
+   987→              <div className="space-y-4">
+   988→                <Skeleton className="h-4 w-32" />
+   989→                <Skeleton className="h-20 w-full" />
+   990→                <Skeleton className="h-4 w-40" />
+   991→                <Skeleton className="h-32 w-full" />
+   992→              </div>
+   993→            ) : detail ? (
+   994→              <>
+   995→                {/* Contacto */}
+   996→                <section className="space-y-2">
+   997→                  <SectionTitle>Contacto</SectionTitle>
+   998→                  <div className="divide-y">
+   999→                    <InfoRow icon={<Mail className="size-4" />} label="Email">
+  1000→                      {detail.email ? (
+  1001→                        <a
+  1002→                          href={`mailto:${detail.email}`}
+  1003→                          className="text-sm text-foreground underline-offset-2 hover:underline"
+  1004→                        >
+  1005→                          {detail.email}
+  1006→                        </a>
+  1007→                      ) : (
+  1008→                        <span className="text-muted-foreground">—</span>
+  1009→                      )}
+  1010→                    </InfoRow>
+  1011→                    <InfoRow icon={<Phone className="size-4" />} label="Teléfono">
+  1012→                      {detail.phone ? (
+  1013→                        <a
+  1014→                          href={`tel:${detail.phone.replace(/\s+/g, '')}`}
+  1015→                          className="text-sm text-foreground underline-offset-2 hover:underline"
+  1016→                        >
+  1017→                          {detail.phone}
+  1018→                        </a>
+  1019→                      ) : (
+  1020→                        <span className="text-muted-foreground">—</span>
+  1021→                      )}
+  1022→                    </InfoRow>
+  1023→                    <InfoRow icon={<MapPin className="size-4" />} label="Ciudad">
+  1024→                      {detail.city ? (
+  1025→                        <span className="text-sm">{detail.city}</span>
+  1026→                      ) : (
+  1027→                        <span className="text-muted-foreground">—</span>
+  1028→                      )}
+  1029→                    </InfoRow>
+  1030→                    <InfoRow icon={<Building2 className="size-4" />} label="Dirección">
+  1031→                      {detail.address ? (
+  1032→                        <span className="text-sm">{detail.address}</span>
+  1033→                      ) : (
+  1034→                        <span className="text-muted-foreground">—</span>
+  1035→                      )}
+  1036→                    </InfoRow>
+  1037→                  </div>
+  1038→                </section>
+  1039→
+  1040→                {/* Estadísticas */}
+  1041→                <section className="space-y-2">
+  1042→                  <SectionTitle>Estadísticas</SectionTitle>
+  1043→                  <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+  1044→                    <MiniStat
+  1045→                      icon={<Receipt className="size-3.5" />}
+  1046→                      label="Total gastado"
+  1047→                      value={formatCOP(detail.totalSpent)}
+  1048→                    />
+  1049→                    <MiniStat
+  1050→                      icon={<ShoppingCart className="size-3.5" />}
+  1051→                      label="Pedidos totales"
+  1052→                      value={String(detail.ordersCount)}
+  1053→                    />
+  1054→                    <MiniStat
+  1055→                      icon={<Receipt className="size-3.5" />}
+  1056→                      label="Ticket promedio"
+  1057→                      value={formatCOP(detailAvgTicket)}
+  1058→                    />
+  1059→                    <MiniStat
+  1060→                      icon={<CalendarClock className="size-3.5" />}
+  1061→                      label="Último pedido"
+  1062→                      value={detail.lastOrderAt ? relativeTime(detail.lastOrderAt) : 'Nunca'}
+  1063→                    />
+  1064→                  </div>
+  1065→                </section>
+  1066→
+  1067→                {/* Historial de pedidos */}
+  1068→                <section className="space-y-3">
+  1069→                  <div className="flex items-center justify-between">
+  1070→                    <SectionTitle>Historial de pedidos</SectionTitle>
+  1071→                    <span className="text-xs text-muted-foreground">
+  1072→                      {detailOrders.length} pedidos
+  1073→                    </span>
+  1074→                  </div>
+  1075→
+  1076→                  {detailOrders.length === 0 ? (
+  1077→                    <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed p-8 text-center">
+  1078→                      <div className="flex size-10 items-center justify-center rounded-full bg-muted text-muted-foreground">
+  1079→                        <Inbox className="size-5" aria-hidden />
+  1080→                      </div>
+  1081→                      <p className="text-sm font-medium text-foreground">
+  1082→                        Sin pedidos registrados
+  1083→                      </p>
+  1084→                      <p className="text-xs text-muted-foreground">
+  1085→                        Este cliente aún no ha realizado compras.
+  1086→                      </p>
+  1087→                    </div>
+  1088→                  ) : (
+  1089→                    <div className="overflow-hidden rounded-lg border">
+  1090→                      <Table>
+  1091→                        <TableHeader>
+  1092→                          <TableRow className="bg-muted/40 hover:bg-muted/40">
+  1093→                            <TableHead className="text-xs uppercase tracking-wide">
+  1094→                              Pedido
+  1095→                            </TableHead>
+  1096→                            <TableHead className="text-xs uppercase tracking-wide">
+  1097→                              Estado
+  1098→                            </TableHead>
+  1099→                            <TableHead className="hidden sm:table-cell text-xs uppercase tracking-wide">
+  1100→                              Pago
+  1101→                            </TableHead>
+  1102→                            <TableHead className="text-right text-xs uppercase tracking-wide">
+  1103→                              Total
+  1104→                            </TableHead>
+  1105→                            <TableHead className="hidden md:table-cell text-right text-xs uppercase tracking-wide">
+  1106→                              Items
+  1107→                            </TableHead>
+  1108→                            <TableHead className="hidden md:table-cell text-xs uppercase tracking-wide">
+  1109→                              Fecha
+  1110→                            </TableHead>
+  1111→                          </TableRow>
+  1112→                        </TableHeader>
+  1113→                        <TableBody>
+  1114→                          {detailOrders.map((o) => (
+  1115→                            <TableRow key={o.id}>
+  1116→                              <TableCell>
+  1117→                                <Link
+  1118→                                  href="/dashboard/pedidos"
+  1119→                                  className="inline-flex items-center gap-1.5 font-mono text-xs text-foreground underline-offset-2 hover:underline"
+  1120→                                >
+  1121→                                  <Hash className="size-3 text-muted-foreground" />
+  1122→                                  {o.orderNumber}
+  1123→                                </Link>
+  1124→                              </TableCell>
+  1125→                              <TableCell>
+  1126→                                <StatusBadge status={o.status} size="sm" />
+  1127→                              </TableCell>
+  1128→                              <TableCell className="hidden sm:table-cell">
+  1129→                                <PaymentMethodBadge method={o.paymentMethod} />
+  1130→                              </TableCell>
+  1131→                              <TableCell className="text-right">
+  1132→                                <span className="tabular-nums text-sm font-medium">
+  1133→                                  {formatCOP(o.total)}
+  1134→                                </span>
+  1135→                              </TableCell>
+  1136→                              <TableCell className="hidden md:table-cell text-right">
+  1137→                                <span className="tabular-nums text-sm text-muted-foreground">
+  1138→                                  {o._count?.items ?? 0}
+  1139→                                </span>
+  1140→                              </TableCell>
+  1141→                              <TableCell className="hidden md:table-cell">
+  1142→                                <span
+  1143→                                  className="text-xs text-muted-foreground"
+  1144→                                  title={formatLongDate(o.placedAt)}
+  1145→                                >
+  1146→                                  {formatDate(o.placedAt)}
+  1147→                                </span>
+  1148→                              </TableCell>
+  1149→                            </TableRow>
+  1150→                          ))}
+  1151→                        </TableBody>
+  1152→                      </Table>
+  1153→                    </div>
+  1154→                  )}
+  1155→                </section>
+  1156→              </>
+  1157→            ) : null}
+  1158→          </div>
+  1159→
+  1160→          {/* Footer */}
+  1161→          {detail?.shopifyId ? (
+  1162→            <footer className="border-t bg-muted/30 p-4">
+  1163→              <div className="flex items-center justify-between gap-2 text-xs">
+  1164→                <span className="text-muted-foreground">Shopify ID</span>
+  1165→                <code className="rounded bg-background px-1.5 py-0.5 font-mono text-[11px] text-foreground">
+  1166→                  {detail.shopifyId}
+  1167→                </code>
+  1168→              </div>
+  1169→            </footer>
+  1170→          ) : null}
+  1171→        </SheetContent>
+  1172→      </Sheet>
+  1173→    </div>
+  1174→  )
+  1175→}
+  1176→
